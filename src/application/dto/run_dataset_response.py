@@ -26,6 +26,9 @@ class AccuracyStatsDTO(BaseModel):
     contains_accuracy: float = 0.0
     sql_exact_match: float = 0.0
     time_shift_score: float = 0.0
+    component_match: float = 0.0
+    schema_hallucination: float = 0.0
+    dialect_error: float = 0.0
     composite_score: float = 0.0
 
 
@@ -55,6 +58,16 @@ class FailureAnalysisDTO(BaseModel):
     categories: list[FailureCategoryDTO] = Field(default_factory=list)
 
 
+class PerformanceStatsDTO(BaseModel):
+    """Performance metrics collected during run."""
+
+    average_total_execution_time_ms: float = 0.0
+    average_time_to_first_row_ms: float = 0.0
+    total_token_usage: int = 0
+    average_token_usage: float = 0.0
+    average_refiner_iterations: float = 0.0
+
+
 class RunDatasetResponse(BaseModel):
     """
     Response body for POST /text-to-sql/evaluation/run-single-dataset.
@@ -71,5 +84,6 @@ class RunDatasetResponse(BaseModel):
     latency: LatencyStatsDTO
     accuracy: AccuracyStatsDTO
     failure_analysis: FailureAnalysisDTO
+    performance: PerformanceStatsDTO
     langfuse_trace_id: str | None = None
     duration_seconds: float = 0.0

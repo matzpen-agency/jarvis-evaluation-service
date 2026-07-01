@@ -11,7 +11,7 @@ Trace hierarchy:
           ├── trino_expected_execution span
           ├── trino_generated_execution span
           └── evaluation span (one per evaluator)
-                  scores via langfuse.score()
+                  scores via langfuse.create_score()
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from typing import Any
 
 import langfuse as lf_sdk
 import structlog
-from langfuse.api.dataset_run_items.types.create_dataset_run_item_request import (
+from langfuse.api.resources.dataset_run_items.types.create_dataset_run_item_request import (
     CreateDatasetRunItemRequest,
 )
 
@@ -41,6 +41,7 @@ class LangfuseReporter(TraceReporter):
 
     def __init__(self, client: lf_sdk.Langfuse | None) -> None:
         self._client = client
+        self._run_spans: dict[str, Any] = {}
 
     @property
     def _enabled(self) -> bool:
@@ -57,19 +58,21 @@ class LangfuseReporter(TraceReporter):
             return run_id
 
         try:
-            trace = self._client.trace(  # type: ignore[union-attr]
+            trace_id = run_id.replace("-", "")
+            span = self._client.start_span(  # type: ignore[union-attr]
                 name=f"eval-run:{dataset_name}",
-                id=run_id,
+                trace_context={"trace_id": trace_id},
                 input={"dataset_name": dataset_name},
                 metadata=metadata,
-                tags=["evaluation", "text-to-sql"],
             )
+            span.update_trace(tags=["evaluation", "text-to-sql"])
+            self._run_spans[trace_id] = span
             logger.info(
                 "langfuse_reporter.trace_created",
-                trace_id=run_id,
+                trace_id=trace_id,
                 dataset_name=dataset_name,
             )
-            return trace.id
+            return trace_id
         except Exception as exc:
             logger.error("langfuse_reporter.create_trace_failed", error=str(exc))
             return run_id
@@ -88,7 +91,7 @@ class LangfuseReporter(TraceReporter):
 
         try:
             # ── Sample-level trace ────────────────────────────────────────────
-            trace = self._client.trace(  # type: ignore[union-attr]
+            sample_span = self._client.start_span(  # type: ignore[union-attr]
                 name=f"eval-sample:{context.dataset_item.id}",
                 input={
                     "query": context.query,
@@ -97,13 +100,21 @@ class LangfuseReporter(TraceReporter):
                 },
                 output=self._build_sample_output(context, results),
                 metadata=self._build_sample_metadata(context),
-                tags=["evaluation", "text-to-sql", "sample"],
             )
-            trace_id = trace.id
+            status_tag = "passed" if context.succeeded else "failed"
+            sample_span.update_trace(
+                tags=["evaluation", "text-to-sql", "sample", status_tag],
+                output={
+                    "generated_sql": context.generated_sql,
+                    "succeeded": context.succeeded,
+                    "scores": {r.evaluator_name: r.score for r in results},
+                },
+            )
+            trace_id = sample_span.trace_id
 
             # ── Agent execution span ──────────────────────────────────────────
-            self._client.span(  # type: ignore[union-attr]
-                trace_id=trace_id,
+            agent_span = self._client.start_span(  # type: ignore[union-attr]
+                trace_context={"trace_id": trace_id, "parent_span_id": sample_span.id},
                 name="agent_execution",
                 input={"query": context.query, "allowed_tables": context.allowed_tables},
                 output={
@@ -116,11 +127,12 @@ class LangfuseReporter(TraceReporter):
                     "timed_out": context.timed_out,
                 },
             )
+            agent_span.end()
 
             # ── Trino execution spans ─────────────────────────────────────────
             if context.expected_result is not None:
-                self._client.span(  # type: ignore[union-attr]
-                    trace_id=trace_id,
+                exp_span = self._client.start_span(  # type: ignore[union-attr]
+                    trace_context={"trace_id": trace_id, "parent_span_id": sample_span.id},
                     name="trino_expected_execution",
                     input={"sql": context.expected_sql},
                     output={
@@ -130,10 +142,11 @@ class LangfuseReporter(TraceReporter):
                     },
                     metadata={"execution_time_ms": context.expected_result.execution_time_ms},
                 )
+                exp_span.end()
 
             if context.generated_result is not None:
-                self._client.span(  # type: ignore[union-attr]
-                    trace_id=trace_id,
+                gen_span = self._client.start_span(  # type: ignore[union-attr]
+                    trace_context={"trace_id": trace_id, "parent_span_id": sample_span.id},
                     name="trino_generated_execution",
                     input={"sql": context.generated_sql},
                     output={
@@ -143,17 +156,20 @@ class LangfuseReporter(TraceReporter):
                     },
                     metadata={"execution_time_ms": context.generated_result.execution_time_ms},
                 )
+                gen_span.end()
 
             # ── Evaluator scores ──────────────────────────────────────────────
             for result in results:
                 if result.error is None:
-                    self._client.score(  # type: ignore[union-attr]
+                    self._client.create_score(  # type: ignore[union-attr]
                         trace_id=trace_id,
                         name=result.evaluator_name,
                         value=result.score,
                         comment=f"passed={result.passed}",
                         data_type="NUMERIC",
                     )
+
+            sample_span.end()
 
             # ── Link sample trace to dataset run ──────────────────────────────
             self._link_to_dataset_run(
@@ -182,31 +198,50 @@ class LangfuseReporter(TraceReporter):
                 ("contains_accuracy", run.accuracy.contains_accuracy),
                 ("sql_exact_match", run.accuracy.sql_exact_match),
                 ("time_shift_score", run.accuracy.time_shift_score),
+                ("component_match", run.accuracy.component_match),
+                ("schema_hallucination", run.accuracy.schema_hallucination),
+                ("dialect_error", run.accuracy.dialect_error),
                 ("failure_rate", run.failure_analysis.failure_rate),
                 ("pass_rate", run.passed / run.total_cases if run.total_cases > 0 else 0.0),
                 ("p95_latency_ms", run.latency.p95),
+                ("average_total_execution_time_ms", run.performance.average_total_execution_time_ms),
+                ("average_time_to_first_row_ms", run.performance.average_time_to_first_row_ms),
+                ("average_token_usage", run.performance.average_token_usage),
+                ("average_iterations", run.iteration_stats.average_iterations),
             ]
 
             for name, value in summary_scores:
-                self._client.score(  # type: ignore[union-attr]
+                self._client.create_score(  # type: ignore[union-attr]
                     trace_id=trace_id,
                     name=name,
                     value=value,
                     data_type="NUMERIC",
                 )
 
-            # Update trace output with summary
-            self._client.trace(  # type: ignore[union-attr]
-                id=trace_id,
-                output={
-                    "total_cases": run.total_cases,
-                    "passed": run.passed,
-                    "failed": run.failed,
-                    "failure_rate": run.failure_rate,
-                    "composite_score": run.accuracy.composite_score,
-                    "duration_seconds": run.duration_seconds,
-                },
-            )
+            # Update trace output with summary and end the root span
+            span = self._run_spans.pop(trace_id, None)
+            if span is not None:
+                span.update(
+                    output={
+                        "total_cases": run.total_cases,
+                        "passed": run.passed,
+                        "failed": run.failed,
+                        "failure_rate": run.failure_rate,
+                        "composite_score": run.accuracy.composite_score,
+                        "duration_seconds": run.duration_seconds,
+                        "performance": {
+                            "average_total_execution_time_ms": run.performance.average_total_execution_time_ms,
+                            "average_time_to_first_row_ms": run.performance.average_time_to_first_row_ms,
+                            "average_token_usage": run.performance.average_token_usage,
+                        },
+                        "iterations": {
+                            "average_iterations": run.iteration_stats.average_iterations,
+                        }
+                    }
+                )
+                span.end()
+            else:
+                logger.warning("langfuse_reporter.run_span_not_found", trace_id=trace_id)
 
             logger.info(
                 "langfuse_reporter.run_summary_written",
@@ -240,7 +275,7 @@ class LangfuseReporter(TraceReporter):
         }
 
     def _build_sample_metadata(self, context: EvaluationContext) -> dict[str, Any]:
-        return {
+        meta = {
             "total_latency_ms": context.total_latency_ms,
             "agent_latency_ms": context.agent_latency_ms,
             "agent_crashed": context.agent_crashed,
@@ -253,6 +288,20 @@ class LangfuseReporter(TraceReporter):
                 context.generated_result.row_count if context.generated_result else None
             ),
         }
+        for key in [
+            "time_to_first_row_ms",
+            "total_execution_time_ms",
+            "token_usage",
+            "refiner_iteration_count",
+            "model_version",
+            "agent_version",
+            "prompt_version",
+            "feature_flags",
+            "evaluation_config",
+        ]:
+            if key in context.metadata:
+                meta[key] = context.metadata[key]
+        return meta
 
     def _link_to_dataset_run(
         self,
@@ -264,15 +313,16 @@ class LangfuseReporter(TraceReporter):
         """Link a sample trace to the Langfuse dataset run."""
         try:
             request = CreateDatasetRunItemRequest(
-                run_name=run_name,
-                dataset_item_id=dataset_item_id,
-                trace_id=trace_id,
+                runName=run_name,
+                datasetItemId=dataset_item_id,
+                traceId=trace_id,
                 metadata=metadata,
             )
-            self._client.client.dataset_run_items.create(request=request)  # type: ignore[union-attr]
+            self._client.api.dataset_run_items.create(request=request)  # type: ignore[union-attr]
         except Exception as exc:
             logger.warning(
                 "langfuse_reporter.link_failed",
                 item_id=dataset_item_id,
                 error=str(exc),
             )
+

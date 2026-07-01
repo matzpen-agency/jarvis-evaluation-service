@@ -14,6 +14,7 @@ from src.application.dto.run_dataset_response import (
     AccuracyStatsDTO,
     FailureAnalysisDTO,
     LatencyStatsDTO,
+    PerformanceStatsDTO,
     RunDatasetResponse,
 )
 from src.main import app
@@ -59,6 +60,9 @@ def test_run_single_dataset_success(client):
             contains_accuracy=0.8,
             sql_exact_match=0.6,
             time_shift_score=0.7,
+            component_match=0.0,
+            schema_hallucination=0.0,
+            dialect_error=0.0,
             composite_score=0.75,
         ),
         failure_analysis=FailureAnalysisDTO(
@@ -67,6 +71,13 @@ def test_run_single_dataset_success(client):
             validation_failure_count=1,
             validation_failure_rate=0.2,
             categories=[],
+        ),
+        performance=PerformanceStatsDTO(
+            average_total_execution_time_ms=0.0,
+            average_time_to_first_row_ms=0.0,
+            total_token_usage=0,
+            average_token_usage=0.0,
+            average_refiner_iterations=0.0,
         ),
     )
     mock_use_case.execute = AsyncMock(return_value=expected_response)

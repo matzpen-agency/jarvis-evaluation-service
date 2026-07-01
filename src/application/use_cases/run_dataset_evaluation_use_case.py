@@ -9,6 +9,7 @@ Responsibilities:
 
 from __future__ import annotations
 
+import asyncio
 import structlog
 
 from src.application.dto.run_dataset_request import RunDatasetRequest
@@ -72,6 +73,9 @@ class RunDatasetEvaluationUseCase:
         dataset_run = await self._runner.run(
             dataset_name=request.dataset_name,
             allowed_tables=allowed_tables,
+            question_ids=request.question_ids,
+            limit=request.limit,
+            offset=request.offset,
         )
 
         return self._to_response(dataset_run)
@@ -79,6 +83,7 @@ class RunDatasetEvaluationUseCase:
     @staticmethod
     def _to_response(run: DatasetRun) -> RunDatasetResponse:
         """Map DatasetRun domain entity to RunDatasetResponse DTO."""
+        from src.application.dto.run_dataset_response import PerformanceStatsDTO
         return RunDatasetResponse(
             dataset_name=run.dataset_name,
             run_id=run.run_id,
@@ -102,6 +107,9 @@ class RunDatasetEvaluationUseCase:
                 contains_accuracy=run.accuracy.contains_accuracy,
                 sql_exact_match=run.accuracy.sql_exact_match,
                 time_shift_score=run.accuracy.time_shift_score,
+                component_match=run.accuracy.component_match,
+                schema_hallucination=run.accuracy.schema_hallucination,
+                dialect_error=run.accuracy.dialect_error,
                 composite_score=run.accuracy.composite_score,
             ),
             failure_analysis=FailureAnalysisDTO(
@@ -126,6 +134,13 @@ class RunDatasetEvaluationUseCase:
                     for c in run.failure_analysis.categories
                 ],
             ),
+            performance=PerformanceStatsDTO(
+                average_total_execution_time_ms=run.performance.average_total_execution_time_ms,
+                average_time_to_first_row_ms=run.performance.average_time_to_first_row_ms,
+                total_token_usage=run.performance.total_token_usage,
+                average_token_usage=run.performance.average_token_usage,
+                average_refiner_iterations=run.iteration_stats.average_iterations,
+            ),
         )
 
 
@@ -137,8 +152,50 @@ class BackendTableResolver:
     """
 
     def __init__(self, backend_url: str, timeout: float = 30.0) -> None:
-        self._url = f"{backend_url}/api/tables"
+        self._url = f"{backend_url}/api/agent/tables"
         self._timeout = timeout
+        self._cached_tables: list[dict] | None = None
+        self._lock = asyncio.Lock()
+
+    async def get_all_tables(self) -> list[dict]:
+        async with self._lock:
+            if self._cached_tables is not None:
+                return self._cached_tables
+            import httpx
+            try:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    response = await client.get(self._url)
+                    response.raise_for_status()
+                    self._cached_tables = response.json()
+                    return self._cached_tables
+            except Exception as exc:
+                logger.warning(
+                    "backend_table_resolver.get_all_tables.failed",
+                    error=str(exc),
+                    fallback="empty_list",
+                )
+                return []
+
+    async def get_table_schema_map(self) -> dict[str, set[str]]:
+        tables = await self.get_all_tables()
+        schema_map: dict[str, set[str]] = {}
+        for t in tables:
+            t_name = t.get("name", "").lower().strip()
+            if not t_name:
+                continue
+            om_json = t.get("openmetadata_json") or {}
+            columns = om_json.get("columns", [])
+            col_names = {c.get("name", "").lower().strip() for c in columns if c.get("name")}
+            schema_map[t_name] = col_names
+
+            s_name = t.get("schema_name", "").lower().strip()
+            if s_name:
+                schema_map[f"{s_name}.{t_name}"] = col_names
+
+            cat_name = t.get("catalog", "").lower().strip()
+            if cat_name and s_name:
+                schema_map[f"{cat_name}.{s_name}.{t_name}"] = col_names
+        return schema_map
 
     async def get_production_tables(self) -> list[str]:
         """

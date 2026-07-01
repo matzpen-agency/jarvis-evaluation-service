@@ -43,8 +43,8 @@ class Settings(BaseSettings):
     TRINO_KEY_PATH: str | None = None
 
     # ── Agent ─────────────────────────────────────────────────────────────────
-    AGENT_URL: str = "http://localhost:8001"
-    AGENT_ENDPOINT: str = "/api/v1/agent/chat"
+    AGENT_URL: str = "http://localhost:8000"
+    AGENT_ENDPOINT: str = "/api/agent/chat"
     AGENT_TIMEOUT: float = 120.0
 
     # ── Backend (for resolving production tables and query execution) ─────────
@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     BACKEND_TIMEOUT: float = 30.0
 
     # ── Evaluation ────────────────────────────────────────────────────────────
-    MAX_CONCURRENT_EVALUATIONS: int = 10
+    MAX_CONCURRENT_EVALUATIONS: int = 2
     EVALUATION_HITL_ENABLED: bool = False
 
     # Time shift offsets in days (negative = past)
@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     COMPOSITE_WEIGHT_CONTAINS_ACCURACY: float = 0.15
     COMPOSITE_WEIGHT_SQL_EXACT_MATCH: float = 0.15
     COMPOSITE_WEIGHT_TIME_SHIFT: float = 0.10
+    COMPOSITE_WEIGHT_COMPONENT_MATCH: float = 0.0
+    COMPOSITE_WEIGHT_SCHEMA_HALLUCINATION: float = 0.0
+    COMPOSITE_WEIGHT_DIALECT_ERROR: float = 0.0
+
+    SPIDER2_QUESTIONS_PATH: str = "src/config/spider2_questions.json"
 
     # Numeric tolerance for result comparison (decimal places)
     NUMERIC_COMPARISON_TOLERANCE: int = 6

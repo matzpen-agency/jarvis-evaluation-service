@@ -87,6 +87,55 @@ class MetricsAggregator:
         # ── Failures ──────────────────────────────────────────────────────────
         failure_analysis = self._failure_analyzer.calculate(contexts)
 
+        # ── Performance Stats ─────────────────────────────────────────────────
+        total_exec_times = []
+        time_to_first_rows = []
+        for ctx in contexts:
+            if "total_execution_time_ms" in ctx.metadata:
+                total_exec_times.append(ctx.metadata["total_execution_time_ms"])
+            elif ctx.generated_result and ctx.generated_result.success:
+                total_exec_times.append(ctx.generated_result.execution_time_ms)
+            else:
+                total_exec_times.append(0.0)
+
+            if "time_to_first_row_ms" in ctx.metadata:
+                time_to_first_rows.append(ctx.metadata["time_to_first_row_ms"])
+            elif ctx.generated_result and ctx.generated_result.success:
+                time_to_first_rows.append(ctx.generated_result.execution_time_ms)
+            else:
+                time_to_first_rows.append(0.0)
+
+        token_usages = [ctx.metadata.get("token_usage", 0) for ctx in contexts]
+        total_tokens = sum(token_usages)
+        avg_tokens = round(total_tokens / len(token_usages), 2) if token_usages else 0.0
+        avg_total_exec_time = round(sum(total_exec_times) / len(total_exec_times), 2) if total_exec_times else 0.0
+        avg_time_to_first_row = round(sum(time_to_first_rows) / len(time_to_first_rows), 2) if time_to_first_rows else 0.0
+
+        from src.domain.entities.dataset_run import PerformanceStats
+        performance_stats = PerformanceStats(
+            average_total_execution_time_ms=avg_total_exec_time,
+            average_time_to_first_row_ms=avg_time_to_first_row,
+            total_token_usage=total_tokens,
+            average_token_usage=avg_tokens,
+        )
+
+        # ── Iteration Stats ───────────────────────────────────────────────────
+        iterations = [ctx.metadata.get("refiner_iteration_count", 0) for ctx in contexts]
+        total_iter = sum(iterations)
+        avg_iter = round(total_iter / len(iterations), 2) if iterations else 0.0
+        max_iter = max(iterations) if iterations else 0
+        iter_dist = {}
+        for it in iterations:
+            iter_dist[it] = iter_dist.get(it, 0) + 1
+
+        from src.domain.entities.dataset_run import IterationStats
+        iteration_stats = IterationStats(
+            average_iterations=avg_iter,
+            max_iterations=max_iter,
+            total_iterations=total_iter,
+            iteration_distribution=iter_dist,
+        )
+
         logger.info(
             "metrics_aggregator.done",
             dataset_name=dataset_name,
@@ -111,6 +160,8 @@ class MetricsAggregator:
             latency=latency_stats,
             accuracy=accuracy,
             failure_analysis=failure_analysis,
+            iteration_stats=iteration_stats,
+            performance=performance_stats,
             langfuse_trace_id=langfuse_trace_id,
         )
 
@@ -133,5 +184,8 @@ class MetricsAggregator:
             contains_accuracy=_avg("contains_accuracy"),
             sql_exact_match=_avg("sql_exact_match"),
             time_shift_score=_avg("time_shift"),
+            component_match=_avg("component_match"),
+            schema_hallucination=_avg("schema_hallucination"),
+            dialect_error=_avg("dialect_error"),
             composite_score=0.0,  # filled in by caller
         )

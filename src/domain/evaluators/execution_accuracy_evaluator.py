@@ -16,6 +16,7 @@ import structlog
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
 from src.domain.evaluators.base_evaluator import BaseEvaluator
+from collections import Counter
 
 logger = structlog.get_logger(__name__)
 
@@ -68,15 +69,19 @@ class ExecutionAccuracyEvaluator(BaseEvaluator):
             self._numeric_tolerance
         )
 
-        # Order-independent set comparison
-        expected_set = frozenset(expected_rows)
-        generated_set = frozenset(generated_rows)
+        # Enforce column count match
+        col_count_match = len(context.expected_result.columns) == len(context.generated_result.columns)
+
+        # Enforce row count match
+        row_count_match = len(expected_rows) == len(generated_rows)
+
+        # Order-independent bag comparison
+        order_independent = Counter(expected_rows) == Counter(generated_rows)
 
         exact_ordered = expected_rows == generated_rows
-        order_independent = expected_set == generated_set
 
-        score = 1.0 if order_independent else 0.0
-        passed = score >= PASS_THRESHOLD
+        passed = col_count_match and row_count_match and order_independent
+        score = 1.0 if passed else 0.0
 
         logger.debug(
             "execution_accuracy.result",
@@ -84,7 +89,7 @@ class ExecutionAccuracyEvaluator(BaseEvaluator):
             expected_rows=len(expected_rows),
             generated_rows=len(generated_rows),
             exact_ordered=exact_ordered,
-            order_independent=order_independent,
+            col_count_match=col_count_match,
         )
 
         return EvaluationResult(
@@ -96,5 +101,6 @@ class ExecutionAccuracyEvaluator(BaseEvaluator):
                 "generated_row_count": len(generated_rows),
                 "exact_ordered_match": exact_ordered,
                 "order_independent_match": order_independent,
+                "col_count_match": col_count_match,
             },
         )

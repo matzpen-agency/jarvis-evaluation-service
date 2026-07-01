@@ -29,6 +29,9 @@ class AccuracyStats:
     contains_accuracy: float = 0.0
     sql_exact_match: float = 0.0
     time_shift_score: float = 0.0
+    component_match: float = 0.0
+    schema_hallucination: float = 0.0
+    dialect_error: float = 0.0
     composite_score: float = 0.0
 
 
@@ -76,6 +79,16 @@ class IterationStats:
 
 
 @dataclass
+class PerformanceStats:
+    """Performance statistics collected during run."""
+
+    average_total_execution_time_ms: float = 0.0
+    average_time_to_first_row_ms: float = 0.0
+    total_token_usage: int = 0
+    average_token_usage: float = 0.0
+
+
+@dataclass
 class DatasetRun:
     """
     Complete result of evaluating a dataset against an AI agent.
@@ -107,6 +120,7 @@ class DatasetRun:
     accuracy: AccuracyStats = field(default_factory=AccuracyStats)
     failure_analysis: FailureAnalysis = field(default_factory=FailureAnalysis)
     iteration_stats: IterationStats = field(default_factory=IterationStats)
+    performance: PerformanceStats = field(default_factory=PerformanceStats)
 
     # ── Tracing ───────────────────────────────────────────────────────────────
     langfuse_trace_id: str | None = None

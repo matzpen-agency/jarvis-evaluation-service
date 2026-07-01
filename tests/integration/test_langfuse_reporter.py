@@ -24,10 +24,11 @@ from src.infrastructure.langfuse.langfuse_reporter import LangfuseReporter
 @pytest.fixture
 def mock_langfuse_sdk_client() -> MagicMock:
     client = MagicMock()
-    # Mock trace method to return a mock trace object with an id
-    mock_trace = MagicMock()
-    mock_trace.id = "mocked-trace-id"
-    client.trace.return_value = mock_trace
+    # Mock start_span method to return a mock span object
+    mock_span = MagicMock()
+    mock_span.id = "mocked-span-id"
+    mock_span.trace_id = "mocked-trace-id"
+    client.start_span.return_value = mock_span
     return client
 
 
@@ -63,14 +64,16 @@ async def test_create_dataset_run_trace(mock_langfuse_sdk_client):
         metadata={"user": "tester"},
     )
 
-    assert trace_id == "mocked-trace-id"
-    mock_langfuse_sdk_client.trace.assert_called_once_with(
+    assert trace_id == "run123"
+    mock_langfuse_sdk_client.start_span.assert_called_once_with(
         name="eval-run:my-dataset",
-        id="run-123",
+        trace_context={"trace_id": "run123"},
         input={"dataset_name": "my-dataset"},
         metadata={"user": "tester"},
-        tags=["evaluation", "text-to-sql"],
     )
+    # Check that tag is added
+    mock_span = mock_langfuse_sdk_client.start_span.return_value
+    mock_span.update_trace.assert_called_once_with(tags=["evaluation", "text-to-sql"])
 
 
 @pytest.mark.integration
@@ -102,7 +105,7 @@ async def test_report_sample(mock_langfuse_sdk_client, sample_dataset_item):
         run_name="my-run-name",
     )
 
-    mock_langfuse_sdk_client.trace.assert_called_with(
+    mock_langfuse_sdk_client.start_span.assert_any_call(
         name="eval-sample:item-001",
         input={
             "query": "show orders",
@@ -123,19 +126,18 @@ async def test_report_sample(mock_langfuse_sdk_client, sample_dataset_item):
             "expected_row_count": 0,
             "generated_row_count": 0,
         },
-        tags=["evaluation", "text-to-sql", "sample"],
     )
 
-    # Verify spans and scores created
-    mock_langfuse_sdk_client.span.assert_any_call(
-        trace_id="mocked-trace-id",
+    # Verify child spans and scores created
+    mock_langfuse_sdk_client.start_span.assert_any_call(
+        trace_context={"trace_id": "mocked-trace-id", "parent_span_id": "mocked-span-id"},
         name="agent_execution",
         input={"query": "show orders", "allowed_tables": ["orders"]},
         output={"sql_query": "SELECT * FROM orders", "status": "completed"},
         metadata={"latency_ms": 0.0, "agent_crashed": False, "timed_out": False},
     )
 
-    mock_langfuse_sdk_client.score.assert_called_with(
+    mock_langfuse_sdk_client.create_score.assert_called_with(
         trace_id="mocked-trace-id",
         name="execution_accuracy",
         value=1.0,
@@ -144,13 +146,15 @@ async def test_report_sample(mock_langfuse_sdk_client, sample_dataset_item):
     )
 
     # Verify linking request is made
-    mock_langfuse_sdk_client.client.dataset_run_items.create.assert_called_once()
+    mock_langfuse_sdk_client.api.dataset_run_items.create.assert_called_once()
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_report_run_summary(mock_langfuse_sdk_client):
     reporter = LangfuseReporter(client=mock_langfuse_sdk_client)
+    mock_span = MagicMock()
+    reporter._run_spans["run-trace-id"] = mock_span
 
     run = DatasetRun(
         dataset_name="my-dataset",
@@ -184,22 +188,21 @@ async def test_report_run_summary(mock_langfuse_sdk_client):
     await reporter.report_run_summary(run=run, trace_id="run-trace-id")
 
     # Verify score updates for run stats
-    mock_langfuse_sdk_client.score.assert_any_call(
+    mock_langfuse_sdk_client.create_score.assert_any_call(
         trace_id="run-trace-id",
         name="composite_score",
         value=0.8,
         data_type="NUMERIC",
     )
-    mock_langfuse_sdk_client.score.assert_any_call(
+    mock_langfuse_sdk_client.create_score.assert_any_call(
         trace_id="run-trace-id",
         name="failure_rate",
         value=0.2,
         data_type="NUMERIC",
     )
 
-    # Verify trace update call
-    mock_langfuse_sdk_client.trace.assert_called_with(
-        id="run-trace-id",
+    # Verify span update and end call
+    mock_span.update.assert_called_with(
         output={
             "total_cases": 10,
             "passed": 8,
@@ -207,8 +210,17 @@ async def test_report_run_summary(mock_langfuse_sdk_client):
             "failure_rate": 0.2,
             "composite_score": 0.8,
             "duration_seconds": 10.0,
+            "performance": {
+                "average_total_execution_time_ms": 0.0,
+                "average_time_to_first_row_ms": 0.0,
+                "average_token_usage": 0.0,
+            },
+            "iterations": {
+                "average_iterations": 0.0,
+            }
         },
     )
+    mock_span.end.assert_called_once()
 
 
 @pytest.mark.integration
@@ -217,3 +229,4 @@ async def test_flush(mock_langfuse_sdk_client):
     reporter = LangfuseReporter(client=mock_langfuse_sdk_client)
     await reporter.flush()
     mock_langfuse_sdk_client.flush.assert_called_once()
+

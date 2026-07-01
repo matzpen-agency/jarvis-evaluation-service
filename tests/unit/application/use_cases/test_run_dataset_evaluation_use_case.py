@@ -108,7 +108,7 @@ async def test_use_case_execute(mock_dataset_run):
 @respx.mock
 async def test_resolver_get_production_tables_list_of_strings():
     """Test when backend returns simple list of strings."""
-    respx.get("http://localhost:8000/api/tables?status=production").mock(
+    respx.get("http://localhost:8000/api/agent/tables?status=production").mock(
         return_value=Response(200, json=["orders", "users"])
     )
 
@@ -122,7 +122,7 @@ async def test_resolver_get_production_tables_list_of_strings():
 @respx.mock
 async def test_resolver_get_production_tables_list_of_dicts():
     """Test when backend returns list of dictionaries with name key."""
-    respx.get("http://localhost:8000/api/tables?status=production").mock(
+    respx.get("http://localhost:8000/api/agent/tables?status=production").mock(
         return_value=Response(200, json=[{"name": "orders"}, {"name": "users"}])
     )
 
@@ -136,7 +136,7 @@ async def test_resolver_get_production_tables_list_of_dicts():
 @respx.mock
 async def test_resolver_get_production_tables_fallback():
     """Test resolver gracefully handles errors and returns empty list."""
-    respx.get("http://localhost:8000/api/tables?status=production").mock(
+    respx.get("http://localhost:8000/api/agent/tables?status=production").mock(
         return_value=Response(500)
     )
 

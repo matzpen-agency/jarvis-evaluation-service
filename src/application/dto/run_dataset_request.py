@@ -25,3 +25,18 @@ class RunDatasetRequest(BaseModel):
         ),
         examples=[["orders", "customers"]],
     )
+    question_ids: list[str] | None = Field(
+        default=None,
+        description="Optional list of specific item IDs to evaluate.",
+        examples=[["q-1", "q-2"]],
+    )
+    limit: int | None = Field(
+        default=None,
+        description="Optional limit on the number of cases to evaluate.",
+        examples=[5],
+    )
+    offset: int | None = Field(
+        default=None,
+        description="Optional offset of cases to evaluate.",
+        examples=[0],
+    )

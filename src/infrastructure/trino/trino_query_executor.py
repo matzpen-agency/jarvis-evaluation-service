@@ -64,7 +64,9 @@ class TrinoQueryExecutor(QueryExecutor):
         start = time.monotonic()
         conn = None
         cur = None
-        log_sql = sql.strip().replace("\n", " ")[:300]
+        # Trino's DBAPI rejects trailing semicolons with SYNTAX_ERROR
+        sql = sql.strip().rstrip(";").strip()
+        log_sql = sql.replace("\n", " ")[:300]
         logger.debug("trino_query_executor.executing", sql=log_sql)
 
         try:

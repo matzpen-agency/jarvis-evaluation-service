@@ -19,7 +19,7 @@ from src.infrastructure.text_to_sql_agent.text_to_sql_agent_client import (
 def agent_settings() -> Settings:
     return Settings(
         AGENT_URL="http://localhost:8001",
-        AGENT_ENDPOINT="/api/v1/agent/chat",
+        AGENT_ENDPOINT="/api/agent/chat",
         AGENT_TIMEOUT=1.0,
     )
 

@@ -25,6 +25,9 @@ from src.domain.evaluators.execution_accuracy_evaluator import (
 )
 from src.domain.evaluators.sql_exact_match_evaluator import SqlExactMatchEvaluator
 from src.domain.evaluators.time_shift_evaluator import TimeShiftEvaluator
+from src.domain.evaluators.component_match_evaluator import ComponentMatchEvaluator
+from src.domain.evaluators.schema_hallucination_evaluator import SchemaHallucinationEvaluator
+from src.domain.evaluators.dialect_error_evaluator import DialectErrorEvaluator
 from src.domain.metrics.composite_score_calculator import CompositeWeights
 from src.domain.services.evaluation_engine import EvaluationEngine
 from src.domain.services.evaluation_runner import EvaluationRunner
@@ -40,7 +43,7 @@ from src.infrastructure.langfuse.text_to_sql_dataset_item_parser import (
 from src.infrastructure.text_to_sql_agent.text_to_sql_agent_client import (
     TextToSqlAgentClient,
 )
-from src.infrastructure.trino.backend_query_executor import BackendQueryExecutor
+from src.infrastructure.trino.trino_query_executor import TrinoQueryExecutor
 from src.ports.query_executor import QueryExecutor
 
 
@@ -63,12 +66,42 @@ def get_langfuse_client(
 def get_query_executor(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> QueryExecutor:
-    """Create and return the Backend query executor."""
-    return BackendQueryExecutor(
-        backend_url=settings.BACKEND_URL,
-        query_endpoint=settings.BACKEND_QUERY_ENDPOINT,
-        timeout=settings.BACKEND_TIMEOUT,
+    """Create and return a direct Trino query executor."""
+    import trino
+    import trino.auth
+
+    def _connection_factory():
+        kwargs: dict = {
+            "host": settings.TRINO_HOST,
+            "port": settings.TRINO_PORT,
+            "user": settings.TRINO_USER,
+            "catalog": settings.TRINO_CATALOG,
+            "schema": settings.TRINO_SCHEMA,
+            "http_scheme": settings.TRINO_HTTP_SCHEME,
+            "request_timeout": settings.TRINO_REQUEST_TIMEOUT,
+            "verify": settings.TRINO_VERIFY,
+        }
+        if settings.TRINO_PASSWORD:
+            kwargs["auth"] = trino.auth.BasicAuthentication(
+                settings.TRINO_USER, settings.TRINO_PASSWORD
+            )
+        if settings.TRINO_CERT_PATH and settings.TRINO_KEY_PATH:
+            kwargs["cert"] = (settings.TRINO_CERT_PATH, settings.TRINO_KEY_PATH)
+        return trino.dbapi.connect(**kwargs)
+
+    return TrinoQueryExecutor(
+        connection_factory=_connection_factory,
         enabled=settings.TRINO_ENABLED,
+    )
+
+
+def get_backend_table_resolver(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> BackendTableResolver:
+    """Create and return the backend table resolver."""
+    return BackendTableResolver(
+        backend_url=settings.BACKEND_URL,
+        timeout=settings.BACKEND_TIMEOUT,
     )
 
 
@@ -78,6 +111,7 @@ def get_query_executor(
 def get_evaluation_engine(
     settings: Annotated[Settings, Depends(get_settings)],
     query_executor: Annotated[QueryExecutor, Depends(get_query_executor)],
+    table_resolver: Annotated[BackendTableResolver, Depends(get_backend_table_resolver)],
 ) -> EvaluationEngine:
     """
     Build the EvaluationEngine with all registered evaluator plugins.
@@ -98,6 +132,9 @@ def get_evaluation_engine(
             offsets_days=settings.TIME_SHIFT_OFFSETS_DAYS,
             numeric_tolerance=settings.NUMERIC_COMPARISON_TOLERANCE,
         ),
+        ComponentMatchEvaluator(),
+        SchemaHallucinationEvaluator(table_resolver=table_resolver),
+        DialectErrorEvaluator(),
     ]
     return EvaluationEngine(evaluators)
 
@@ -111,6 +148,9 @@ def get_metrics_aggregator(
         contains_accuracy=settings.COMPOSITE_WEIGHT_CONTAINS_ACCURACY,
         sql_exact_match=settings.COMPOSITE_WEIGHT_SQL_EXACT_MATCH,
         time_shift=settings.COMPOSITE_WEIGHT_TIME_SHIFT,
+        component_match=settings.COMPOSITE_WEIGHT_COMPONENT_MATCH,
+        schema_hallucination=settings.COMPOSITE_WEIGHT_SCHEMA_HALLUCINATION,
+        dialect_error=settings.COMPOSITE_WEIGHT_DIALECT_ERROR,
     )
     return MetricsAggregator(weights=weights)
 
@@ -124,6 +164,7 @@ def get_run_dataset_use_case(
     query_executor: Annotated[QueryExecutor, Depends(get_query_executor)],
     evaluation_engine: Annotated[EvaluationEngine, Depends(get_evaluation_engine)],
     metrics_aggregator: Annotated[MetricsAggregator, Depends(get_metrics_aggregator)],
+    resolver: Annotated[BackendTableResolver, Depends(get_backend_table_resolver)],
 ) -> RunDatasetEvaluationUseCase:
     """Wire all dependencies and return the fully configured use case."""
 
@@ -131,10 +172,6 @@ def get_run_dataset_use_case(
     dataset_provider = LangfuseDatasetProvider(client=langfuse_client, parser=parser)
     agent_client = TextToSqlAgentClient(settings=settings)
     reporter = LangfuseReporter(client=langfuse_client)
-    resolver = BackendTableResolver(
-        backend_url=settings.BACKEND_URL,
-        timeout=settings.BACKEND_TIMEOUT,
-    )
 
     runner = EvaluationRunner(
         dataset_provider=dataset_provider,

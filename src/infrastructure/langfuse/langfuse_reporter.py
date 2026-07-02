@@ -177,6 +177,7 @@ class LangfuseReporter(TraceReporter):
                 trace_id=trace_id,
                 run_name=run_name,
                 metadata={"parent_run_trace_id": parent_trace_id},
+                observation_id=sample_span.id,
             )
 
         except Exception as exc:
@@ -309,6 +310,7 @@ class LangfuseReporter(TraceReporter):
         trace_id: str,
         run_name: str,
         metadata: dict,
+        observation_id: str | None = None,
     ) -> None:
         """Link a sample trace to the Langfuse dataset run."""
         try:
@@ -316,6 +318,7 @@ class LangfuseReporter(TraceReporter):
                 runName=run_name,
                 datasetItemId=dataset_item_id,
                 traceId=trace_id,
+                observationId=observation_id,
                 metadata=metadata,
             )
             self._client.api.dataset_run_items.create(request=request)  # type: ignore[union-attr]

@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     COMPOSITE_WEIGHT_DIALECT_ERROR: float = 0.0
 
     SPIDER2_QUESTIONS_PATH: str = "src/config/spider2_questions.json"
+    SPIDER2_GITHUB_ENABLED: bool = True
+    SPIDER2_CACHE_TTL_HOURS: int = 24
 
     # Numeric tolerance for result comparison (decimal places)
     NUMERIC_COMPARISON_TOLERANCE: int = 6

@@ -14,6 +14,8 @@ from src.domain.entities.dataset_item import DatasetItem
 from src.ports.dataset_item_parser import DatasetItemParser
 from src.ports.dataset_provider import DatasetProvider
 
+from src.ports.query_executor import QueryExecutor
+
 logger = structlog.get_logger(__name__)
 
 
@@ -33,9 +35,11 @@ class LangfuseDatasetProvider(DatasetProvider):
         self,
         client: lf_sdk.Langfuse,
         parser: DatasetItemParser,
+        query_executor: QueryExecutor | None = None,
     ) -> None:
         self._client = client
         self._parser = parser
+        self._query_executor = query_executor
 
     async def get_dataset(self, name: str) -> list[DatasetItem]:
         """
@@ -47,7 +51,7 @@ class LangfuseDatasetProvider(DatasetProvider):
         logger.info("langfuse_dataset_provider.loading", dataset_name=name)
         if "spider2" in name.lower() or name == "spider":
             logger.info("langfuse_dataset_provider.spider2_force_local", dataset_name=name)
-            items = self._load_local_spider2()
+            items = await self._load_spider2_benchmark(name)
             self._sync_to_langfuse(name, items)
             return items
 
@@ -87,10 +91,11 @@ class LangfuseDatasetProvider(DatasetProvider):
         )
         return items
 
-    def _load_local_spider2(self) -> list[DatasetItem]:
-        import json
+    async def _load_spider2_benchmark(self, dataset_name: str) -> list[DatasetItem]:
+        import asyncio
         import os
         from src.config.settings import Settings
+        from src.infrastructure.spider2.spider2_lite_downloader import Spider2LiteDownloader
 
         settings = Settings()
         path = settings.SPIDER2_QUESTIONS_PATH
@@ -98,28 +103,33 @@ class LangfuseDatasetProvider(DatasetProvider):
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
             path = os.path.abspath(os.path.join(project_root, path))
 
-        if not os.path.exists(path):
-            logger.error("langfuse_dataset_provider.local_spider2_not_found", path=path)
-            raise DatasetNotFoundError(f"Spider2.0 dataset questions file not found at {path}.")
-
-        try:
-            with open(path, "r") as f:
-                raw_items = json.load(f)
-        except Exception as exc:
-            logger.error("langfuse_dataset_provider.local_spider2_parse_failed", path=path, error=str(exc))
-            raise ValueError(f"Failed to parse local spider2 JSON: {exc}")
-
-        items: list[DatasetItem] = []
-        for raw in raw_items:
+        # Query available catalogs from Trino
+        available_catalogs = None
+        if self._query_executor:
             try:
-                parsed = self._parser.parse(raw)
-                items.append(parsed)
+                res = await self._query_executor.execute("SHOW CATALOGS")
+                if res.success and res.rows:
+                    available_catalogs = {row[0].lower() for row in res.rows if row}
+                    logger.info("langfuse_dataset_provider.available_catalogs", catalogs=available_catalogs)
             except Exception as exc:
-                logger.warning(
-                    "langfuse_dataset_provider.local_item_parse_failed",
-                    item_id=raw.get("id", "unknown"),
-                    error=str(exc),
-                )
+                logger.warning("langfuse_dataset_provider.fetch_catalogs_failed", error=str(exc))
+
+        # Check if the dataset name requests a specific database (e.g. "spider2-airlines")
+        db_filter = None
+        if "-" in dataset_name:
+            parts = dataset_name.split("-", 1)
+            if len(parts) > 1 and parts[1].strip():
+                db_filter = parts[1].strip()
+
+        downloader = Spider2LiteDownloader(
+            cache_path=path,
+            available_catalogs=available_catalogs,
+            cache_ttl_hours=settings.SPIDER2_CACHE_TTL_HOURS,
+            github_enabled=settings.SPIDER2_GITHUB_ENABLED,
+            db_filter=db_filter,
+        )
+
+        items = await asyncio.to_thread(downloader.download)
         return items
 
     def _sync_to_langfuse(self, dataset_name: str, items: list[DatasetItem]) -> None:

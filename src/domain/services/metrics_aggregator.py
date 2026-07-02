@@ -136,6 +136,20 @@ class MetricsAggregator:
             iteration_distribution=iter_dist,
         )
 
+        # ── Cases ─────────────────────────────────────────────────────────────
+        from src.domain.entities.dataset_run import DatasetCaseResult
+        cases = [
+            DatasetCaseResult(
+                question_id=r.context.dataset_item.id,
+                generated_sql=r.context.generated_sql,
+                expected_sql=r.context.expected_sql,
+                succeeded=r.context.succeeded,
+                error=r.context.error,
+                scores={res.evaluator_name: res.score for res in r.results},
+            )
+            for r in records
+        ]
+
         logger.info(
             "metrics_aggregator.done",
             dataset_name=dataset_name,
@@ -163,6 +177,7 @@ class MetricsAggregator:
             iteration_stats=iteration_stats,
             performance=performance_stats,
             langfuse_trace_id=langfuse_trace_id,
+            cases=cases,
         )
 
     def _compute_accuracy_stats(

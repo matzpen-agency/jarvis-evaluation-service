@@ -83,7 +83,7 @@ class RunDatasetEvaluationUseCase:
     @staticmethod
     def _to_response(run: DatasetRun) -> RunDatasetResponse:
         """Map DatasetRun domain entity to RunDatasetResponse DTO."""
-        from src.application.dto.run_dataset_response import PerformanceStatsDTO
+        from src.application.dto.run_dataset_response import PerformanceStatsDTO, RunDatasetCaseResultDTO
         return RunDatasetResponse(
             dataset_name=run.dataset_name,
             run_id=run.run_id,
@@ -141,6 +141,17 @@ class RunDatasetEvaluationUseCase:
                 average_token_usage=run.performance.average_token_usage,
                 average_refiner_iterations=run.iteration_stats.average_iterations,
             ),
+            cases=[
+                RunDatasetCaseResultDTO(
+                    question_id=c.question_id,
+                    generated_sql=c.generated_sql,
+                    expected_sql=c.expected_sql,
+                    succeeded=c.succeeded,
+                    error=c.error,
+                    scores=c.scores,
+                )
+                for c in run.cases
+            ],
         )
 
 

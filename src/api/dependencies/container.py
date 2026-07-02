@@ -169,7 +169,11 @@ def get_run_dataset_use_case(
     """Wire all dependencies and return the fully configured use case."""
 
     parser = TextToSqlDatasetItemParser()
-    dataset_provider = LangfuseDatasetProvider(client=langfuse_client, parser=parser)
+    dataset_provider = LangfuseDatasetProvider(
+        client=langfuse_client,
+        parser=parser,
+        query_executor=query_executor,
+    )
     agent_client = TextToSqlAgentClient(settings=settings)
     reporter = LangfuseReporter(client=langfuse_client)
 

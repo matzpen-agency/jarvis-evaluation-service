@@ -89,6 +89,18 @@ class PerformanceStats:
 
 
 @dataclass
+class DatasetCaseResult:
+    """Detailed evaluation result for a single case/question."""
+
+    question_id: str
+    generated_sql: str | None = None
+    expected_sql: str | None = None
+    succeeded: bool = False
+    error: str | None = None
+    scores: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
 class DatasetRun:
     """
     Complete result of evaluating a dataset against an AI agent.
@@ -124,3 +136,6 @@ class DatasetRun:
 
     # ── Tracing ───────────────────────────────────────────────────────────────
     langfuse_trace_id: str | None = None
+
+    # ── Detailed Case Results ─────────────────────────────────────────────────
+    cases: list[DatasetCaseResult] = field(default_factory=list)

@@ -68,6 +68,17 @@ class PerformanceStatsDTO(BaseModel):
     average_refiner_iterations: float = 0.0
 
 
+class RunDatasetCaseResultDTO(BaseModel):
+    """Detailed evaluation result for a single case/question."""
+
+    question_id: str
+    generated_sql: str | None = None
+    expected_sql: str | None = None
+    succeeded: bool = False
+    error: str | None = None
+    scores: dict[str, float] = Field(default_factory=dict)
+
+
 class RunDatasetResponse(BaseModel):
     """
     Response body for POST /text-to-sql/evaluation/run-single-dataset.
@@ -87,3 +98,4 @@ class RunDatasetResponse(BaseModel):
     performance: PerformanceStatsDTO
     langfuse_trace_id: str | None = None
     duration_seconds: float = 0.0
+    cases: list[RunDatasetCaseResultDTO] = Field(default_factory=list)

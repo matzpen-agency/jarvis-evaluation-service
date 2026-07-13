@@ -40,17 +40,21 @@ class SchemaHallucinationEvaluator(BaseEvaluator):
         if not context.generated_sql:
             return EvaluationResult(
                 evaluator_name=self.name,
-                score=1.0,
-                passed=True,
+                score=0.0,
+                passed=False,
                 details={"reason": "no_generated_sql"},
             )
 
         # 1. Fetch the catalog/schema map from the backend resolver
+        column_check_available = True
         try:
             schema_map = await self._resolver.get_table_schema_map()
+            if not schema_map:
+                column_check_available = False
         except Exception as exc:
             logger.warning("schema_hallucination.resolver_failed", error=str(exc))
             schema_map = {}
+            column_check_available = False
 
         # 2. Extract referenced tables and columns from the generated query
         referenced = self._extract_tables_and_columns(context.generated_sql)
@@ -111,6 +115,7 @@ class SchemaHallucinationEvaluator(BaseEvaluator):
                 "hallucinated_tables": hallucinated_tables,
                 "hallucinated_columns": hallucinated_columns,
                 "referenced_tables_columns": {t: list(c) for t, c in referenced.items()},
+                "column_check_available": column_check_available,
             },
         )
 

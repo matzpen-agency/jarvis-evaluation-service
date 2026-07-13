@@ -19,6 +19,8 @@ import re
 
 import structlog
 
+from collections import Counter
+
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
 from src.domain.evaluators.base_evaluator import BaseEvaluator
@@ -141,14 +143,14 @@ class TimeShiftEvaluator(BaseEvaluator):
                 "generated_error": generated_result.error,
             }
 
-        expected_rows = frozenset(
-            expected_result.as_normalised_row_tuples(self._numeric_tolerance)
-        )
-        generated_rows = frozenset(
-            generated_result.as_normalised_row_tuples(self._numeric_tolerance)
-        )
+        expected_rows = expected_result.as_normalised_row_tuples(self._numeric_tolerance)
+        generated_rows = generated_result.as_normalised_row_tuples(self._numeric_tolerance)
 
-        score = 1.0 if expected_rows == generated_rows else 0.0
+        col_count_match = len(expected_result.columns) == len(generated_result.columns)
+        row_count_match = len(expected_rows) == len(generated_rows)
+        order_independent = Counter(expected_rows) == Counter(generated_rows)
+
+        score = 1.0 if (col_count_match and row_count_match and order_independent) else 0.0
         return {
             "offset_days": offset_days,
             "score": score,

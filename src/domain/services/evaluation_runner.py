@@ -238,7 +238,12 @@ class EvaluationRunner:
             context.agent_latency_ms = time.monotonic() * 1000 - agent_start
 
             if not agent_response.succeeded:
-                context.error = agent_response.error or "agent_did_not_produce_sql"
+                if agent_response.sql_query is not None:
+                    # Agent produced SQL but didn't complete normally (e.g. HITL escalation
+                    # after a Trino error). The SQL still exists and will be evaluated.
+                    context.error = "sql_execution_failure"
+                else:
+                    context.error = agent_response.error or "agent_did_not_produce_sql"
 
             # ── Step B: Execute expected and generated SQL concurrently ────────
             if item.expected_sql and context.generated_sql:

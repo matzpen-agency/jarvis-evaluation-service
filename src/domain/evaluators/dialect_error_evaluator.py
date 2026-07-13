@@ -35,8 +35,8 @@ class DialectErrorEvaluator(BaseEvaluator):
         if not context.generated_sql:
             return EvaluationResult(
                 evaluator_name=self.name,
-                score=1.0,
-                passed=True,
+                score=0.0,
+                passed=False,
                 details={"reason": "no_generated_sql"},
             )
 

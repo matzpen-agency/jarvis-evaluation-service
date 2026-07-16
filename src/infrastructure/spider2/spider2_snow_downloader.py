@@ -1,7 +1,7 @@
 """
-spider2_lite_downloader.py — Downloads and translates Spider 2-lite benchmark questions.
+spider2_snow_downloader.py — Downloads and translates Spider 2-snow benchmark questions.
 
-Fetches Snowflake-based questions (sf_ prefix) from the public Spider 2-lite GitHub
+Fetches Snowflake-based questions (sf_ prefix) from the public Spider 2-snow GitHub
 repository, translates gold SQL from Snowflake to Trino dialect using sqlglot,
 and caches results locally to avoid re-downloading on every run.
 """
@@ -23,18 +23,18 @@ logger = structlog.get_logger(__name__)
 
 SPIDER2_JSONL_URL = (
     "https://raw.githubusercontent.com/xlang-ai/Spider2/main/"
-    "spider2-lite/spider2-lite.jsonl"
+    "spider2-snow/spider2-snow.jsonl"
 )
 SPIDER2_GOLD_SQL_BASE_URL = (
     "https://raw.githubusercontent.com/xlang-ai/Spider2/main/"
-    "spider2-lite/evaluation_suite/gold/sql/"
+    "spider2-snow/evaluation_suite/gold/sql/"
 )
 GITHUB_TIMEOUT = 15  # seconds per request
 
 
-class Spider2LiteDownloader:
+class Spider2SnowDownloader:
     """
-    Downloads Spider 2-lite benchmark questions from GitHub, filters to Snowflake
+    Downloads Spider 2-snow benchmark questions from GitHub, filters to Snowflake
     databases available in Trino, translates SQL to Trino dialect, and caches results.
 
     Catalog availability and database filtering are applied dynamically when
@@ -68,13 +68,13 @@ class Spider2LiteDownloader:
                 all_items = self._fetch_from_github()
                 self._write_cache(all_items)
                 logger.info(
-                    "spider2_downloader.refreshed",
+                    "spider2_snow_downloader.refreshed",
                     count=len(all_items),
                     cache=self._cache_path,
                 )
             except Exception as exc:
                 logger.warning(
-                    "spider2_downloader.github_failed_using_cache",
+                    "spider2_snow_downloader.github_failed_using_cache",
                     error=str(exc),
                 )
 
@@ -88,7 +88,7 @@ class Spider2LiteDownloader:
         questions = self._fetch_jsonl()
         sf_questions = [q for q in questions if q.get("instance_id", "").startswith("sf_")]
         logger.info(
-            "spider2_downloader.sf_questions_found",
+            "spider2_snow_downloader.sf_questions_found",
             total=len(questions),
             sf_count=len(sf_questions),
         )
@@ -96,7 +96,7 @@ class Spider2LiteDownloader:
         items: list[DatasetItem] = []
         for q in sf_questions:
             instance_id = q["instance_id"]
-            db = q.get("db", "")
+            db = q.get("db_id", "")
             catalog = self._db_to_catalog(db)
 
             gold_sql = self._fetch_gold_sql(instance_id)
@@ -107,12 +107,12 @@ class Spider2LiteDownloader:
 
             item = DatasetItem(
                 id=instance_id,
-                input={"query": q["question"]},
+                input={"query": q["instruction"]},
                 expected_output={"sql": trino_sql},
                 metadata={
                     "difficulty": "complex",
                     "question_type": "join",
-                    "source": "spider2_lite",
+                    "source": "spider2_snow",
                     "db": db,
                     "catalog": catalog,
                     "external_knowledge": q.get("external_knowledge"),
@@ -120,11 +120,11 @@ class Spider2LiteDownloader:
             )
             items.append(item)
 
-        logger.info("spider2_downloader.fetch_complete", count=len(items))
+        logger.info("spider2_snow_downloader.fetch_complete", count=len(items))
         return items
 
     def _fetch_jsonl(self) -> list[dict]:
-        """Download and parse the Spider 2-lite questions JSONL file."""
+        """Download and parse the Spider 2-snow questions JSONL file."""
         req = urllib.request.Request(
             SPIDER2_JSONL_URL,
             headers={"User-Agent": "jarvis-evaluation-service/1.0"},
@@ -153,7 +153,9 @@ class Spider2LiteDownloader:
             with urllib.request.urlopen(req, timeout=GITHUB_TIMEOUT) as resp:
                 return resp.read().decode("utf-8").strip()
         except Exception as exc:
-            logger.debug("spider2_downloader.gold_sql_fetch_failed", url=url, error=str(exc))
+            logger.debug(
+                "spider2_snow_downloader.gold_sql_fetch_failed", url=url, error=str(exc)
+            )
             return None
 
     # ── SQL translation ───────────────────────────────────────────────────────
@@ -178,7 +180,7 @@ class Spider2LiteDownloader:
                 return trino_sql
         except Exception as exc:
             logger.warning(
-                "spider2_downloader.sql_translation_failed",
+                "spider2_snow_downloader.sql_translation_failed",
                 instance_id=instance_id,
                 error=str(exc),
             )
@@ -228,9 +230,9 @@ class Spider2LiteDownloader:
     def _load_cache(self) -> list[DatasetItem]:
         """Load DatasetItems from the local cache file."""
         if not os.path.exists(self._cache_path):
-            logger.error("spider2_downloader.cache_not_found", path=self._cache_path)
+            logger.error("spider2_snow_downloader.cache_not_found", path=self._cache_path)
             raise FileNotFoundError(
-                f"Spider 2-lite cache not found at {self._cache_path} and GitHub is disabled."
+                f"Spider 2-snow cache not found at {self._cache_path} and GitHub is disabled."
             )
 
         with open(self._cache_path, "r", encoding="utf-8") as f:
@@ -262,5 +264,5 @@ class Spider2LiteDownloader:
                 )
             )
 
-        logger.info("spider2_downloader.loaded_from_cache", count=len(items))
+        logger.info("spider2_snow_downloader.loaded_from_cache", count=len(items))
         return items

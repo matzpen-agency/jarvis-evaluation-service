@@ -95,7 +95,7 @@ class LangfuseDatasetProvider(DatasetProvider):
         import asyncio
         import os
         from src.config.settings import Settings
-        from src.infrastructure.spider2.spider2_lite_downloader import Spider2LiteDownloader
+        from src.infrastructure.spider2.spider2_snow_downloader import Spider2SnowDownloader
 
         settings = Settings()
         path = settings.SPIDER2_QUESTIONS_PATH
@@ -121,7 +121,7 @@ class LangfuseDatasetProvider(DatasetProvider):
             if len(parts) > 1 and parts[1].strip():
                 db_filter = parts[1].strip()
 
-        downloader = Spider2LiteDownloader(
+        downloader = Spider2SnowDownloader(
             cache_path=path,
             available_catalogs=available_catalogs,
             cache_ttl_hours=settings.SPIDER2_CACHE_TTL_HOURS,

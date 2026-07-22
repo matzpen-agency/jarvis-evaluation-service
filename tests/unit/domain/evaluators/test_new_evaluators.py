@@ -67,8 +67,8 @@ async def test_component_match_partial(comp_evaluator, sample_dataset_item):
 
     result = await comp_evaluator.evaluate(ctx)
     assert result.score < 1.0
-    # SELECT, FROM, GROUP, ORDER, JOIN should match (5 out of 6), WHERE mismatches
-    assert result.score == round(5 / 6, 4)
+    # SELECT, FROM, JOIN, GROUP, HAVING, ORDER, LIMIT all match (7 out of 8); WHERE mismatches
+    assert result.score == round(7 / 8, 4)
     assert result.passed is False
 
 

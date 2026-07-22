@@ -131,6 +131,7 @@ def get_evaluation_engine(
             query_executor=query_executor,
             offsets_days=settings.TIME_SHIFT_OFFSETS_DAYS,
             numeric_tolerance=settings.NUMERIC_COMPARISON_TOLERANCE,
+            table_resolver=table_resolver,
         ),
         ComponentMatchEvaluator(),
         SchemaHallucinationEvaluator(table_resolver=table_resolver),

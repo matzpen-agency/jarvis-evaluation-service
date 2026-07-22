@@ -2,53 +2,40 @@
 time_shift_evaluator.py — Evaluates SQL correctness across multiple date offsets.
 
 For each configured time shift (e.g. -1, -7, -14, -30, -60 days):
-  1. Inject date offset into both expected and generated SQL by replacing
-     CURRENT_DATE with a Trino date arithmetic expression.
-  2. Re-execute both queries via the QueryExecutor.
-  3. Compare results using the same logic as ExecutionAccuracyEvaluator.
+  1. Wrap both expected and generated SQL with Trino CTEs that shift ALL
+     date/timestamp columns in the referenced tables using date_add().
+  2. Re-execute both shifted queries via the QueryExecutor.
+  3. Compare results using evaluate_contains (column-order invariant & fractional containment).
 
 Aggregate score = mean of all individual shift scores.
-
-Purpose: Detect queries that accidentally only work for a specific point in time.
 """
 
 from __future__ import annotations
 
 import asyncio
-import re
 
 import structlog
-
-from collections import Counter
 
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
 from src.domain.evaluators.base_evaluator import BaseEvaluator
+from src.domain.evaluators.sql_comparison_utils import (
+    dynamically_wrap_with_yaml_cte,
+    evaluate_contains,
+)
 from src.ports.query_executor import QueryExecutor
 
 logger = structlog.get_logger(__name__)
-
-# Trino date arithmetic: DATE_ADD('day', -N, CURRENT_DATE)
-_DATE_PATTERN = re.compile(r"\bCURRENT_DATE\b", re.IGNORECASE)
-
-
-def _inject_date_offset(sql: str, offset_days: int) -> str:
-    """
-    Replace CURRENT_DATE with DATE_ADD('day', <offset>, CURRENT_DATE).
-    offset_days is typically negative (past).
-    """
-    if not _DATE_PATTERN.search(sql):
-        return sql
-    replacement = f"DATE_ADD('day', {offset_days}, CURRENT_DATE)"
-    return _DATE_PATTERN.sub(replacement, sql)
 
 
 class TimeShiftEvaluator(BaseEvaluator):
     """
     Runs the same query under multiple date offsets and checks whether
-    results remain consistent (i.e., the SQL logic is time-agnostic).
+    results remain consistent (i.e. the SQL logic is time-agnostic).
 
-    Requires a QueryExecutor for re-executing shifted queries.
+    Uses _dynamically_wrap_with_yaml_cte to shift literal date/timestamp
+    columns in the underlying tables, covering all temporal representations.
+    Delegates result comparison to evaluate_contains.
     """
 
     def __init__(
@@ -56,10 +43,12 @@ class TimeShiftEvaluator(BaseEvaluator):
         query_executor: QueryExecutor,
         offsets_days: list[int] | None = None,
         numeric_tolerance: int = 6,
+        table_resolver=None,
     ) -> None:
         self._executor = query_executor
         self._offsets = offsets_days if offsets_days is not None else [-1, -7, -14, -30, -60]
         self._numeric_tolerance = numeric_tolerance
+        self._resolver = table_resolver
 
     @property
     def name(self) -> str:
@@ -81,12 +70,22 @@ class TimeShiftEvaluator(BaseEvaluator):
                 details={"reason": "missing_sql"},
             )
 
+        # Build schema map once for all shifts
+        schema_map: dict[str, set[str]] = {}
+        if self._resolver is not None:
+            try:
+                schema_map = await self._resolver.get_table_schema_map()
+            except Exception as exc:
+                logger.warning(
+                    "time_shift_evaluator.schema_map_failed", error=str(exc)
+                )
+
         shift_results: list[dict] = []
         scores: list[float] = []
 
         # Run all shifts concurrently
         tasks = [
-            self._evaluate_shift(context, offset)
+            self._evaluate_shift(context, offset, schema_map)
             for offset in self._offsets
         ]
         shift_outcomes = await asyncio.gather(*tasks, return_exceptions=True)
@@ -101,7 +100,9 @@ class TimeShiftEvaluator(BaseEvaluator):
                     offset_days=offset,
                     error=str(outcome),
                 )
-                shift_results.append({"offset_days": offset, "score": 0.0, "error": str(outcome)})
+                shift_results.append(
+                    {"offset_days": offset, "score": 0.0, "error": str(outcome)}
+                )
                 scores.append(0.0)
 
         aggregate_score = round(sum(scores) / len(scores), 4) if scores else 0.0
@@ -125,10 +126,21 @@ class TimeShiftEvaluator(BaseEvaluator):
             },
         )
 
-    async def _evaluate_shift(self, context: EvaluationContext, offset_days: int) -> dict:
-        """Run one date-shifted comparison and return a result dict."""
-        expected_shifted = _inject_date_offset(context.expected_sql, offset_days)
-        generated_shifted = _inject_date_offset(context.generated_sql, offset_days)
+    async def _evaluate_shift(
+        self,
+        context: EvaluationContext,
+        offset_days: int,
+        schema_map: dict[str, set[str]],
+    ) -> dict:
+        """
+        Wrap both SQLs with date-shifting CTEs, execute, and compare with evaluate_contains.
+        """
+        expected_shifted = dynamically_wrap_with_yaml_cte(
+            context.expected_sql, offset_days, schema_map
+        )
+        generated_shifted = dynamically_wrap_with_yaml_cte(
+            context.generated_sql, offset_days, schema_map
+        )
 
         expected_result, generated_result = await asyncio.gather(
             self._executor.execute(expected_shifted),
@@ -143,17 +155,15 @@ class TimeShiftEvaluator(BaseEvaluator):
                 "generated_error": generated_result.error,
             }
 
-        expected_rows = expected_result.as_normalised_row_tuples(self._numeric_tolerance)
-        generated_rows = generated_result.as_normalised_row_tuples(self._numeric_tolerance)
+        score, details = evaluate_contains(
+            expected_result=expected_result,
+            generated_result=generated_result,
+            numeric_tolerance=self._numeric_tolerance,
+        )
 
-        col_count_match = len(expected_result.columns) == len(generated_result.columns)
-        row_count_match = len(expected_rows) == len(generated_rows)
-        order_independent = Counter(expected_rows) == Counter(generated_rows)
-
-        score = 1.0 if (col_count_match and row_count_match and order_independent) else 0.0
         return {
             "offset_days": offset_days,
             "score": score,
-            "expected_row_count": len(expected_rows),
-            "generated_row_count": len(generated_rows),
+            "passed": score >= 1.0,
+            **details,
         }

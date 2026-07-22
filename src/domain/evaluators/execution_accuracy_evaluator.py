@@ -7,16 +7,22 @@ Supports three comparison modes:
   3. Numeric-tolerance equality
 
 Score: 1.0 if results match, 0.0 otherwise.
+
+Both expected and generated result rows are normalized via _sort_dataframe
+(column-order-invariant sort) before comparison.
 """
 
 from __future__ import annotations
+
+from collections import Counter
 
 import structlog
 
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
+from src.domain.entities.query_result import QueryResult
 from src.domain.evaluators.base_evaluator import BaseEvaluator
-from collections import Counter
+from src.domain.evaluators.sql_comparison_utils import _sort_dataframe
 
 logger = structlog.get_logger(__name__)
 
@@ -27,7 +33,8 @@ class ExecutionAccuracyEvaluator(BaseEvaluator):
     """
     Compares expected query result vs generated query result.
 
-    When both Trino executions succeed, row sets are compared.
+    When both Trino executions succeed, row sets are compared after normalizing
+    column order via _sort_dataframe.
     If either execution failed, score = 0.0.
     """
 
@@ -62,23 +69,25 @@ class ExecutionAccuracyEvaluator(BaseEvaluator):
                 details={"reason": "generated_sql_execution_failed"},
             )
 
-        expected_rows = context.expected_result.as_normalised_row_tuples(
-            self._numeric_tolerance
+        # Sort columns and rows for column-order-invariant comparison
+        exp_rows, exp_cols = _sort_dataframe(
+            context.expected_result.rows, context.expected_result.columns
         )
-        generated_rows = context.generated_result.as_normalised_row_tuples(
-            self._numeric_tolerance
+        gen_rows, gen_cols = _sort_dataframe(
+            context.generated_result.rows, context.generated_result.columns
         )
 
-        # Enforce column count match
-        col_count_match = len(context.expected_result.columns) == len(context.generated_result.columns)
+        # Build temporary QueryResults for normalised tuple conversion
+        exp_qr = QueryResult(success=True, rows=exp_rows, columns=exp_cols)
+        gen_qr = QueryResult(success=True, rows=gen_rows, columns=gen_cols)
 
-        # Enforce row count match
-        row_count_match = len(expected_rows) == len(generated_rows)
+        expected_tuples = exp_qr.as_normalised_row_tuples(self._numeric_tolerance)
+        generated_tuples = gen_qr.as_normalised_row_tuples(self._numeric_tolerance)
 
-        # Order-independent bag comparison
-        order_independent = Counter(expected_rows) == Counter(generated_rows)
-
-        exact_ordered = expected_rows == generated_rows
+        col_count_match = len(exp_cols) == len(gen_cols)
+        row_count_match = len(expected_tuples) == len(generated_tuples)
+        order_independent = Counter(expected_tuples) == Counter(generated_tuples)
+        exact_ordered = expected_tuples == generated_tuples
 
         passed = col_count_match and row_count_match and order_independent
         score = 1.0 if passed else 0.0
@@ -86,8 +95,8 @@ class ExecutionAccuracyEvaluator(BaseEvaluator):
         logger.debug(
             "execution_accuracy.result",
             dataset_item_id=context.dataset_item.id,
-            expected_rows=len(expected_rows),
-            generated_rows=len(generated_rows),
+            expected_rows=len(expected_tuples),
+            generated_rows=len(generated_tuples),
             exact_ordered=exact_ordered,
             col_count_match=col_count_match,
         )
@@ -97,8 +106,8 @@ class ExecutionAccuracyEvaluator(BaseEvaluator):
             score=score,
             passed=passed,
             details={
-                "expected_row_count": len(expected_rows),
-                "generated_row_count": len(generated_rows),
+                "expected_row_count": len(expected_tuples),
+                "generated_row_count": len(generated_tuples),
                 "exact_ordered_match": exact_ordered,
                 "order_independent_match": order_independent,
                 "col_count_match": col_count_match,

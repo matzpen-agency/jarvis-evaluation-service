@@ -31,7 +31,12 @@ async def test_exact_match_scores_1(evaluator, sample_context):
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_order_independent_match(evaluator, sample_context, sample_dataset_item):
-    """Results in different row order should still score 1.0."""
+    """Results in different row order should still score 1.0.
+
+    After _sort_dataframe normalization, both sides are sorted identically,
+    so order_independent_match and exact_ordered_match are both True.
+    This is the desired behaviour: the evaluator is now fully order-invariant.
+    """
     ctx = EvaluationContext(
         dataset_item=sample_dataset_item,
         run_id="run-x",

@@ -1,5 +1,9 @@
 """
 test_time_shift_evaluator.py — Unit tests for TimeShiftEvaluator.
+
+Updated to reflect the new CTE-based temporal shifting approach via
+_dynamically_wrap_with_yaml_cte / _sort_dataframe, replacing the old
+_inject_date_offset (CURRENT_DATE regex patching) approach.
 """
 
 from __future__ import annotations
@@ -10,21 +14,48 @@ import pytest
 
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.query_result import QueryResult
-from src.domain.evaluators.time_shift_evaluator import (
-    TimeShiftEvaluator,
-    _inject_date_offset,
-)
+from src.domain.evaluators.time_shift_evaluator import TimeShiftEvaluator
+from src.domain.evaluators.sql_comparison_utils import dynamically_wrap_with_yaml_cte
 
 
-def test_inject_date_offset():
-    """Test standard date replacements using regex."""
-    assert _inject_date_offset("SELECT * FROM orders WHERE created_at = CURRENT_DATE", -7) == (
-        "SELECT * FROM orders WHERE created_at = DATE_ADD('day', -7, CURRENT_DATE)"
-    )
-    assert _inject_date_offset("SELECT * FROM orders WHERE created_at = current_date", -7) == (
-        "SELECT * FROM orders WHERE created_at = DATE_ADD('day', -7, CURRENT_DATE)"
-    )
-    assert _inject_date_offset("SELECT * FROM orders", -7) == "SELECT * FROM orders"
+# ── dynamically_wrap_with_yaml_cte unit tests ─────────────────────────────────
+
+
+def test_cte_wrap_zero_shift_returns_original():
+    """shift_days=0 must return the query unchanged."""
+    sql = "SELECT * FROM orders WHERE order_date = CURRENT_DATE"
+    assert dynamically_wrap_with_yaml_cte(sql, 0, {}) == sql
+
+
+def test_cte_wrap_no_schema_map_returns_original():
+    """With an empty schema map no CTEs are generated — original returned."""
+    sql = "SELECT * FROM orders WHERE order_date = CURRENT_DATE"
+    result = dynamically_wrap_with_yaml_cte(sql, -7, {})
+    assert result == sql
+
+
+def test_cte_wrap_with_date_column():
+    """When a table has a date column, a CTE is generated and the table reference replaced."""
+    sql = "SELECT * FROM orders"
+    schema_map = {"orders": {"order_date", "customer_id", "amount"}}
+    result = dynamically_wrap_with_yaml_cte(sql, -7, schema_map)
+    assert "WITH" in result
+    assert "orders_cte" in result
+    assert "date_add" in result
+    assert "order_date" in result
+
+
+def test_cte_wrap_skips_table_with_no_date_columns():
+    """Tables with no date-heuristic columns are not wrapped."""
+    sql = "SELECT * FROM products"
+    schema_map = {"products": {"sku", "name", "price"}}
+    result = dynamically_wrap_with_yaml_cte(sql, -7, schema_map)
+    # No CTE because no date columns
+    assert "WITH" not in result
+    assert result == sql
+
+
+# ── TimeShiftEvaluator behavior tests ────────────────────────────────────────
 
 
 @pytest.mark.unit
@@ -68,16 +99,17 @@ async def test_all_shifts_pass(sample_dataset_item):
         dataset_item=sample_dataset_item,
         run_id="run-x",
         query="test",
-        expected_sql="SELECT CURRENT_DATE",
+        expected_sql="SELECT order_date FROM orders",
         allowed_tables=[],
     )
-    ctx.generated_sql = "SELECT CURRENT_DATE"
+    ctx.generated_sql = "SELECT order_date FROM orders"
 
     result = await evaluator.evaluate(ctx)
     assert result.score == 1.0
     assert result.passed is True
     assert len(result.details["shift_results"]) == 2
-    assert executor.execute.call_count == 4  # 2 offsets * 2 queries (expected + generated)
+    # 2 offsets × 2 queries (expected + generated)
+    assert executor.execute.call_count == 4
 
 
 @pytest.mark.unit
@@ -86,12 +118,13 @@ async def test_some_shifts_fail(sample_dataset_item):
     """When one shift returns mismatched rows, the overall score should reflect this."""
     executor = AsyncMock()
 
-    # We will control the return value based on SQL string passed
+    call_count = {"n": 0}
+
     async def mock_execute(sql: str) -> QueryResult:
-        # If it contains -7 offset and + 1 (the generated query), return mismatched rows.
-        if "-7" in sql and "+ 1" in sql:
+        call_count["n"] += 1
+        # Every other call returns different rows to simulate a mismatch
+        if call_count["n"] % 2 == 0:
             return QueryResult(success=True, rows=[[20]], columns=["v"], row_count=1)
-        # default matching rows
         return QueryResult(success=True, rows=[[10]], columns=["v"], row_count=1)
 
     executor.execute = AsyncMock(side_effect=mock_execute)
@@ -101,16 +134,14 @@ async def test_some_shifts_fail(sample_dataset_item):
         dataset_item=sample_dataset_item,
         run_id="run-x",
         query="test",
-        expected_sql="SELECT CURRENT_DATE",
+        expected_sql="SELECT order_date FROM orders",
         allowed_tables=[],
     )
-    ctx.generated_sql = "SELECT CURRENT_DATE + 1"
+    ctx.generated_sql = "SELECT order_date FROM orders"
 
     result = await evaluator.evaluate(ctx)
-    # offset -1: score 1.0 (both return [[10]])
-    # offset -7: SELECT CURRENT_DATE returns [[10]], SELECT CURRENT_DATE + 1 returns [[20]], score 0.0
-    # Average score: 0.5. Since 0.5 < 0.8, passed should be False
-    assert result.score == 0.5
+    # Both shifts mismatched → score 0.0
+    assert result.score == 0.0
     assert result.passed is False
 
 
@@ -127,10 +158,10 @@ async def test_execution_failure_returns_zero(sample_dataset_item):
         dataset_item=sample_dataset_item,
         run_id="run-x",
         query="test",
-        expected_sql="SELECT CURRENT_DATE",
+        expected_sql="SELECT order_date FROM orders",
         allowed_tables=[],
     )
-    ctx.generated_sql = "SELECT CURRENT_DATE"
+    ctx.generated_sql = "SELECT order_date FROM orders"
 
     result = await evaluator.evaluate(ctx)
     assert result.score == 0.0
@@ -141,7 +172,7 @@ async def test_execution_failure_returns_zero(sample_dataset_item):
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_exception_handling(sample_dataset_item):
-    """If a shift task raises an exception, the gather should catch it, and report it in details without crashing."""
+    """If a shift task raises an exception, gather catches it and reports without crashing."""
     executor = AsyncMock()
     executor.execute = AsyncMock(side_effect=ValueError("Boom"))
 
@@ -151,10 +182,10 @@ async def test_exception_handling(sample_dataset_item):
         dataset_item=sample_dataset_item,
         run_id="run-x",
         query="test",
-        expected_sql="SELECT CURRENT_DATE",
+        expected_sql="SELECT order_date FROM orders",
         allowed_tables=[],
     )
-    ctx.generated_sql = "SELECT CURRENT_DATE"
+    ctx.generated_sql = "SELECT order_date FROM orders"
 
     result = await evaluator.evaluate(ctx)
     assert result.score == 0.0
@@ -166,7 +197,7 @@ async def test_exception_handling(sample_dataset_item):
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_unhandled_exception_returns_error_result():
-    """If an unhandled exception occurs outside the tasks, the evaluator catches it and returns error."""
+    """If an unhandled exception occurs outside the tasks, the evaluator catches it."""
     executor = AsyncMock()
     evaluator = TimeShiftEvaluator(query_executor=executor)
 
@@ -176,4 +207,3 @@ async def test_unhandled_exception_returns_error_result():
     assert result.passed is False
     assert result.error is not None
     assert "expected_sql" in result.error
-

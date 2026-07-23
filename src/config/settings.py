@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     BACKEND_TIMEOUT: float = 30.0
 
     # ── Evaluation ────────────────────────────────────────────────────────────
-    MAX_CONCURRENT_EVALUATIONS: int = 2
+    MAX_CONCURRENT_EVALUATIONS: int = 1
     EVALUATION_HITL_ENABLED: bool = False
 
     # Time shift offsets in days (negative = past)

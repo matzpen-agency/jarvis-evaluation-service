@@ -24,27 +24,14 @@ from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
 from src.domain.entities.query_result import QueryResult
 from src.domain.evaluators.base_evaluator import BaseEvaluator
-from src.domain.evaluators.sql_comparison_utils import _sort_dataframe
+from src.domain.evaluators.sql_comparison_utils import (
+    _requires_order_by,
+    _sort_dataframe,
+)
 
 logger = structlog.get_logger(__name__)
 
 PASS_THRESHOLD = 1.0  # exact match required
-
-
-def _requires_order_by(sql: str | None) -> bool:
-    """
-    Check if the given SQL query contains an ORDER BY clause using sqlglot AST.
-    """
-    if not sql:
-        return False
-    try:
-        parsed = sqlglot.parse_one(sql, error_level=sqlglot.ErrorLevel.IGNORE)
-        return parsed is not None and parsed.find(exp.Order) is not None
-    except Exception:
-        # Fallback to regex check if sqlglot fails to parse
-        import re
-
-        return bool(re.search(r"\border\s+by\b", sql, re.IGNORECASE))
 
 
 class ExecutionAccuracyEvaluator(BaseEvaluator):
@@ -107,18 +94,18 @@ class ExecutionAccuracyEvaluator(BaseEvaluator):
         col_count_match = len(exp_cols) == len(gen_cols)
         row_count_match = len(expected_tuples) == len(generated_tuples)
 
-        # Raw (un-sorted row) check for exact_ordered
         raw_exp_tuples = context.expected_result.as_normalised_row_tuples(self._numeric_tolerance)
         raw_gen_tuples = context.generated_result.as_normalised_row_tuples(self._numeric_tolerance)
 
+        exact_ordered = (
+            context.expected_result.columns == context.generated_result.columns
+            and raw_exp_tuples == raw_gen_tuples
+        )
+        order_independent = Counter(expected_tuples) == Counter(generated_tuples)
+
         if requires_ordering:
-            exact_ordered = (
-                context.expected_result.columns == context.generated_result.columns
-                and raw_exp_tuples == raw_gen_tuples
-            )
             passed = col_count_match and row_count_match and exact_ordered
         else:
-            order_independent = Counter(expected_tuples) == Counter(generated_tuples)
             passed = col_count_match and row_count_match and order_independent
 
         score = 1.0 if passed else 0.0

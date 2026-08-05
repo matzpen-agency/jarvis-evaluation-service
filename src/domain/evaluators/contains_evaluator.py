@@ -12,7 +12,10 @@ import structlog
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
 from src.domain.evaluators.base_evaluator import BaseEvaluator
-from src.domain.evaluators.sql_comparison_utils import evaluate_contains
+from src.domain.evaluators.sql_comparison_utils import (
+    _requires_order_by,
+    evaluate_contains,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -44,10 +47,12 @@ class ContainsEvaluator(BaseEvaluator):
             return EvaluationResult.from_error(self.name, str(exc))
 
     def _evaluate(self, context: EvaluationContext) -> EvaluationResult:
+        requires_ordering = _requires_order_by(context.expected_sql)
         score, details = evaluate_contains(
             expected_result=context.expected_result,
             generated_result=context.generated_result,
             numeric_tolerance=self._numeric_tolerance,
+            requires_ordering=requires_ordering,
         )
         passed = score >= PASS_THRESHOLD
 

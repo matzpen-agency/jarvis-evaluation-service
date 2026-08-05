@@ -46,8 +46,9 @@ async def test_whitespace_difference_normalized(evaluator, sample_dataset_item):
         "SELECT COUNT(*) FROM orders",
     )
     result = await evaluator.evaluate(ctx)
-    # Normalized and AST levels should match
-    assert result.details["normalized_score"] == 1.0
+    assert result.score == 1.0
+    assert result.passed is True
+    assert result.details["normalized_match"] is True
 
 
 @pytest.mark.unit
@@ -59,7 +60,7 @@ async def test_completely_different_sql(evaluator, sample_dataset_item):
         "SELECT revenue FROM products",
     )
     result = await evaluator.evaluate(ctx)
-    assert result.score < 0.5
+    assert result.score == 0.0
     assert result.passed is False
 
 
@@ -88,4 +89,6 @@ async def test_case_insensitive_match(evaluator, sample_dataset_item):
         "select count(*) from orders",
     )
     result = await evaluator.evaluate(ctx)
-    assert result.details["raw_score"] == 1.0
+    assert result.score == 1.0
+    assert result.passed is True
+    assert result.details["normalized_match"] is True

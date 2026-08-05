@@ -78,3 +78,55 @@ async def test_ex_contains_row_count_mismatch_fails(evaluator, sample_dataset_it
     result = await evaluator.evaluate(ctx)
     assert result.score == 0.0
     assert result.passed is False
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ex_contains_order_by_enforced(evaluator, sample_dataset_item):
+    """When expected_sql has ORDER BY, generated rows must be an ordered subsequence."""
+    # Scrambled rows: [3, 1, 2] is NOT an ordered subsequence of [1, 2, 3] → fail
+    ctx = EvaluationContext(
+        dataset_item=sample_dataset_item, run_id="r", query="q",
+        expected_sql="SELECT v FROM t ORDER BY v ASC", allowed_tables=[]
+    )
+    ctx.expected_result = QueryResult(success=True, rows=[[1], [2], [3]], columns=["v"], row_count=3)
+    ctx.generated_result = QueryResult(success=True, rows=[[3], [1], [2]], columns=["v"], row_count=3)
+
+    result = await evaluator.evaluate(ctx)
+    assert result.score == 0.0
+    assert result.passed is False
+    assert result.details["requires_ordering"] is True
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ex_contains_order_by_subsequence_passes(evaluator, sample_dataset_item):
+    """[2, 3] is an ordered subsequence of [1, 2, 3] → pass."""
+    ctx = EvaluationContext(
+        dataset_item=sample_dataset_item, run_id="r", query="q",
+        expected_sql="SELECT v FROM t ORDER BY v ASC", allowed_tables=[]
+    )
+    ctx.expected_result = QueryResult(success=True, rows=[[1], [2], [3]], columns=["v"], row_count=3)
+    ctx.generated_result = QueryResult(success=True, rows=[[2], [3]], columns=["v"], row_count=2)
+
+    result = await evaluator.evaluate(ctx)
+    assert result.score == 1.0
+    assert result.passed is True
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ex_contains_order_by_reverse_subsequence_fails(evaluator, sample_dataset_item):
+    """[3, 2] is NOT an ordered subsequence of [1, 2, 3] → fail."""
+    ctx = EvaluationContext(
+        dataset_item=sample_dataset_item, run_id="r", query="q",
+        expected_sql="SELECT v FROM t ORDER BY v ASC", allowed_tables=[]
+    )
+    ctx.expected_result = QueryResult(success=True, rows=[[1], [2], [3]], columns=["v"], row_count=3)
+    ctx.generated_result = QueryResult(success=True, rows=[[3], [2]], columns=["v"], row_count=2)
+
+    result = await evaluator.evaluate(ctx)
+    assert result.score == 0.0
+    assert result.passed is False
+
+

@@ -1,12 +1,7 @@
 """
-sql_exact_match_evaluator.py — Multi-level SQL text and AST comparison.
+sql_exact_match_evaluator.py — Normalized SQL text comparison.
 
-Three comparison levels:
-  1. Raw      (20% weight) — lowercased + whitespace-collapsed exact match
-  2. Normalized (30% weight) — strip comments, aliases, semicolons
-  3. AST       (50% weight) — sqlglot canonical form comparison
-
-Score = weighted average of all three similarity values.
+Score = 1.0 if normalized SQL strings match, 0.0 otherwise.
 """
 
 from __future__ import annotations
@@ -21,12 +16,7 @@ from src.domain.evaluators.base_evaluator import BaseEvaluator
 
 logger = structlog.get_logger(__name__)
 
-# Weights for each comparison level
-_RAW_WEIGHT = 0.20
-_NORMALIZED_WEIGHT = 0.30
-_AST_WEIGHT = 0.50
-
-PASS_THRESHOLD = 0.60  # composite SQL match to pass
+PASS_THRESHOLD = 1.0  # exact normalized match required
 
 
 def _normalize_sql(sql: str) -> str:
@@ -49,33 +39,9 @@ def _normalize_sql(sql: str) -> str:
     return sql
 
 
-def _ast_canonical(sql: str) -> str:
-    """
-    Return the sqlglot canonical form of a SQL string.
-    Falls back to normalized form on parse errors.
-    """
-    try:
-        import sqlglot
-
-        parsed = sqlglot.parse_one(sql, error_level=sqlglot.ErrorLevel.IGNORE)
-        if parsed is not None:
-            return parsed.sql(pretty=False).lower().strip()
-    except Exception:
-        pass
-    return _normalize_sql(sql)
-
-
-def _similarity(a: str, b: str) -> float:
-    """Binary similarity: 1.0 if strings match, 0.0 otherwise."""
-    return 1.0 if a == b else 0.0
-
-
 class SqlExactMatchEvaluator(BaseEvaluator):
     """
-    Compares generated SQL to expected SQL at three levels of strictness.
-
-    Returns a weighted composite score that rewards AST equivalence most
-    heavily, allowing trivial formatting differences to still score highly.
+    Compares generated SQL to expected SQL after normalizing whitespace, casing, and comments.
     """
 
     @property
@@ -105,50 +71,25 @@ class SqlExactMatchEvaluator(BaseEvaluator):
                 details={"reason": "no_generated_sql"},
             )
 
-        expected = context.expected_sql
-        generated = context.generated_sql
-
-        # ── Level 1: Raw ──────────────────────────────────────────────────────
-        raw_exp = re.sub(r"\s+", " ", expected.lower()).strip()
-        raw_gen = re.sub(r"\s+", " ", generated.lower()).strip()
-        raw_score = _similarity(raw_exp, raw_gen)
-
-        # ── Level 2: Normalized ───────────────────────────────────────────────
-        norm_exp = _normalize_sql(expected)
-        norm_gen = _normalize_sql(generated)
-        normalized_score = _similarity(norm_exp, norm_gen)
-
-        # ── Level 3: AST ──────────────────────────────────────────────────────
-        ast_exp = _ast_canonical(expected)
-        ast_gen = _ast_canonical(generated)
-        ast_score = _similarity(ast_exp, ast_gen)
-
-        # ── Composite ─────────────────────────────────────────────────────────
-        composite = (
-            _RAW_WEIGHT * raw_score
-            + _NORMALIZED_WEIGHT * normalized_score
-            + _AST_WEIGHT * ast_score
-        )
-        composite = round(composite, 4)
-        passed = composite >= PASS_THRESHOLD
+        norm_exp = _normalize_sql(context.expected_sql)
+        norm_gen = _normalize_sql(context.generated_sql)
+        passed = norm_exp == norm_gen
+        score = 1.0 if passed else 0.0
 
         logger.debug(
             "sql_exact_match.result",
             dataset_item_id=context.dataset_item.id,
-            raw=raw_score,
-            normalized=normalized_score,
-            ast=ast_score,
-            composite=composite,
+            score=score,
+            passed=passed,
         )
 
         return EvaluationResult(
             evaluator_name=self.name,
-            score=composite,
+            score=score,
             passed=passed,
             details={
-                "raw_score": raw_score,
-                "normalized_score": normalized_score,
-                "ast_score": ast_score,
-                "composite_score": composite,
+                "normalized_match": passed,
+                "expected_normalized": norm_exp,
+                "generated_normalized": norm_gen,
             },
         )

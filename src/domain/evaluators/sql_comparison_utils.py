@@ -19,9 +19,25 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import sqlglot
+import sqlglot.expressions as exp
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+
+def _requires_order_by(sql: str | None) -> bool:
+    """
+    Check if the given SQL query contains an ORDER BY clause using sqlglot AST.
+    """
+    if not sql:
+        return False
+    try:
+        parsed = sqlglot.parse_one(sql, error_level=sqlglot.ErrorLevel.IGNORE)
+        return parsed is not None and parsed.find(exp.Order) is not None
+    except Exception:
+        # Fallback to regex check if sqlglot fails to parse
+        return bool(re.search(r"\border\s+by\b", sql, re.IGNORECASE))
 
 # ── Column heuristics ─────────────────────────────────────────────────────────
 # A column whose name contains any of these tokens is treated as a date/ts col.
@@ -155,20 +171,41 @@ def _sort_dataframe(
     return reordered_rows, sorted_columns
 
 
+def _is_ordered_subsequence(sub: list, seq: list) -> bool:
+    """
+    Return True if `sub` is an ordered subsequence of `seq`.
+
+    Each element of `sub` must appear in `seq` in the same relative order,
+    but elements in `seq` can be skipped.
+
+    Examples:
+        _is_ordered_subsequence([2, 3], [1, 2, 3]) → True
+        _is_ordered_subsequence([3, 2], [1, 2, 3]) → False
+        _is_ordered_subsequence([1, 2, 3], [1, 2, 3]) → True
+    """
+    it = iter(seq)
+    return all(item in it for item in sub)
+
+
 def evaluate_contains(
     expected_result: Any,
     generated_result: Any,
     numeric_tolerance: int = 6,
+    requires_ordering: bool = False,
 ) -> tuple[float, dict[str, Any]]:
     """
-    Compare expected and generated QueryResults for row containment.
+    Compare expected and generated QueryResults for column data containment.
 
-    1. Normalizes columns deterministically via _sort_dataframe (preserving row sequence).
-    2. Maps expected columns to generated columns by name, then positionally.
-    3. Computes fractional containment score: matched_expected_rows / total_expected_rows.
+    1. If requires_ordering is False:
+       Enforces 100% row count match. Checks whether all columns of
+       expected_result exist as a subset (by data values) of the
+       generated_result columns (multiset equality).
+    2. If requires_ordering is True:
+       Checks that the generated row-tuples form an ordered subsequence
+       of the expected row-tuples.
 
     Returns:
-        (score, details_dict)
+        (1.0 if column data is contained, else 0.0, details_dict)
     """
     from collections import Counter
     from src.domain.entities.query_result import QueryResult
@@ -178,84 +215,138 @@ def evaluate_contains(
     if generated_result is None or not generated_result.success:
         return 0.0, {"reason": "generated_sql_execution_failed"}
 
-    # Sort columns deterministically
-    exp_rows, exp_cols = _sort_dataframe(
-        expected_result.rows, expected_result.columns
-    )
-    gen_rows, gen_cols = _sort_dataframe(
-        generated_result.rows, generated_result.columns
-    )
+    n_exp_cols = len(expected_result.columns)
+    n_gen_cols = len(generated_result.columns)
 
-    n_expected_cols = len(exp_cols)
-    n_generated_cols = len(gen_cols)
-
-    expected_col_lower = [c.lower().strip() for c in exp_cols]
-    generated_col_lower = [c.lower().strip() for c in gen_cols]
-
-    col_indices: list[int | None] = [None] * n_expected_cols
-    used_gen_indices: set[int] = set()
-
-    for i, exp_col in enumerate(expected_col_lower):
-        if exp_col in generated_col_lower:
-            idx = generated_col_lower.index(exp_col)
-            col_indices[i] = idx
-            used_gen_indices.add(idx)
-
-    gen_idx = 0
-    for i in range(n_expected_cols):
-        if col_indices[i] is None:
-            while gen_idx < n_generated_cols and gen_idx in used_gen_indices:
-                gen_idx += 1
-            if gen_idx < n_generated_cols:
-                col_indices[i] = gen_idx
-                used_gen_indices.add(gen_idx)
-                gen_idx += 1
-            else:
-                return 0.0, {
-                    "reason": "missing_expected_columns",
-                    "expected_columns": expected_col_lower,
-                    "generated_columns": generated_col_lower,
-                }
-
-    exp_qr = QueryResult(success=True, rows=exp_rows, columns=exp_cols)
-    expected_rows = exp_qr.as_normalised_row_tuples(numeric_tolerance)
-
-    projected_gen_rows = []
-    for row in gen_rows:
-        if all(idx is not None and idx < len(row) for idx in col_indices):
-            projected_gen_rows.append([row[idx] for idx in col_indices])
-        else:
-            return 0.0, {"reason": "generated_row_too_short"}
-
-    tmp_result = QueryResult(
-        success=True, rows=projected_gen_rows, columns=exp_cols
-    )
-    generated_rows = tmp_result.as_normalised_row_tuples(numeric_tolerance)
-
-    if len(expected_rows) != len(generated_rows):
+    if n_gen_cols < n_exp_cols:
         return 0.0, {
-            "reason": "row_count_mismatch",
-            "expected_row_count": len(expected_rows),
-            "generated_row_count": len(generated_rows),
+            "reason": "insufficient_generated_columns",
+            "expected_column_count": n_exp_cols,
+            "generated_column_count": n_gen_cols,
         }
 
-    expected_counter = Counter(expected_rows)
-    generated_counter = Counter(generated_rows)
+    # Normalize both results into row tuples
+    exp_qr = QueryResult(
+        success=True, rows=expected_result.rows, columns=expected_result.columns
+    )
+    gen_qr = QueryResult(
+        success=True, rows=generated_result.rows, columns=generated_result.columns
+    )
 
-    total_expected = sum(expected_counter.values())
-    if total_expected == 0:
-        score = 1.0 if len(generated_rows) == 0 else 0.0
+    exp_tuples = exp_qr.as_normalised_row_tuples(numeric_tolerance)
+    gen_tuples = gen_qr.as_normalised_row_tuples(numeric_tolerance)
+
+    if not exp_tuples and not gen_tuples:
+        return 1.0, {
+            "expected_row_count": 0,
+            "generated_row_count": 0,
+            "requires_ordering": requires_ordering,
+            "column_containment": True,
+        }
+
+    if requires_ordering:
+        # ── Ordered subsequence branch ────────────────────────────────────────
+        # The generated rows must be an ordered subsequence of the expected rows.
+        # Row counts do NOT need to be equal.
+        # Column matching is name-agnostic: find the generated column whose
+        # ordered value list is a subsequence of the expected column's value list.
+
+        exp_cols_data = [
+            [row[i] for row in exp_tuples] for i in range(n_exp_cols)
+        ]
+        gen_cols_data = [
+            [row[i] for row in gen_tuples] for i in range(n_gen_cols)
+        ]
+
+        used_gen_indices: set[int] = set()
+        col_mapping: list[int] = []
+
+        for exp_col in exp_cols_data:
+            matched_idx = None
+            for gen_idx, gen_col in enumerate(gen_cols_data):
+                if gen_idx in used_gen_indices:
+                    continue
+                if _is_ordered_subsequence(gen_col, exp_col):
+                    matched_idx = gen_idx
+                    break
+            if matched_idx is None:
+                return 0.0, {
+                    "reason": "column_data_not_ordered_subsequence",
+                    "expected_column_count": n_exp_cols,
+                    "generated_column_count": n_gen_cols,
+                    "requires_ordering": True,
+                }
+            used_gen_indices.add(matched_idx)
+            col_mapping.append(matched_idx)
+
+        # Project generated rows onto the matched columns and verify
+        # the full multi-column row-tuples form an ordered subsequence
+        projected_gen = [
+            tuple(row[col_mapping[i]] for i in range(n_exp_cols))
+            for row in gen_tuples
+        ]
+        projected_exp = [
+            tuple(row[i] for i in range(n_exp_cols))
+            for row in exp_tuples
+        ]
+
+        if not _is_ordered_subsequence(projected_gen, projected_exp):
+            return 0.0, {
+                "reason": "generated_rows_not_ordered_subsequence",
+                "expected_row_count": len(exp_tuples),
+                "generated_row_count": len(gen_tuples),
+                "requires_ordering": True,
+            }
+
+        return 1.0, {
+            "expected_row_count": len(exp_tuples),
+            "generated_row_count": len(gen_tuples),
+            "requires_ordering": True,
+            "column_containment": True,
+        }
+
     else:
-        matched_count = sum(
-            min(generated_counter[row], count)
-            for row, count in expected_counter.items()
-        )
-        score = round(matched_count / total_expected, 4)
+        # ── Unordered branch: enforce 100% row count + multiset column match ──
+        if len(expected_result.rows) != len(generated_result.rows):
+            return 0.0, {
+                "reason": "row_count_mismatch",
+                "expected_row_count": len(expected_result.rows),
+                "generated_row_count": len(generated_result.rows),
+            }
 
-    return score, {
-        "expected_row_count": len(expected_rows),
-        "generated_row_count": len(generated_rows),
-    }
+        exp_cols_data = [
+            [row[i] for row in exp_tuples] for i in range(n_exp_cols)
+        ]
+        gen_cols_data = [
+            [row[i] for row in gen_tuples] for i in range(n_gen_cols)
+        ]
+
+        used_gen_indices: set[int] = set()
+
+        for exp_col in exp_cols_data:
+            exp_col_counter = Counter(exp_col)
+            matched_idx = None
+            for gen_idx, gen_col in enumerate(gen_cols_data):
+                if gen_idx in used_gen_indices:
+                    continue
+                if Counter(gen_col) == exp_col_counter:
+                    matched_idx = gen_idx
+                    break
+            if matched_idx is None:
+                return 0.0, {
+                    "reason": "column_data_not_contained",
+                    "expected_column_count": n_exp_cols,
+                    "generated_column_count": n_gen_cols,
+                    "requires_ordering": False,
+                }
+            used_gen_indices.add(matched_idx)
+
+        return 1.0, {
+            "expected_row_count": len(exp_tuples),
+            "generated_row_count": len(gen_tuples),
+            "requires_ordering": False,
+            "column_containment": True,
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

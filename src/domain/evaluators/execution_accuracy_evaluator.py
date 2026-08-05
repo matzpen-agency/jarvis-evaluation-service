@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from collections import Counter
 
+import sqlglot
+import sqlglot.expressions as exp
 import structlog
 
 from src.domain.entities.evaluation_context import EvaluationContext
@@ -29,12 +31,29 @@ logger = structlog.get_logger(__name__)
 PASS_THRESHOLD = 1.0  # exact match required
 
 
+def _requires_order_by(sql: str | None) -> bool:
+    """
+    Check if the given SQL query contains an ORDER BY clause using sqlglot AST.
+    """
+    if not sql:
+        return False
+    try:
+        parsed = sqlglot.parse_one(sql, error_level=sqlglot.ErrorLevel.IGNORE)
+        return parsed is not None and parsed.find(exp.Order) is not None
+    except Exception:
+        # Fallback to regex check if sqlglot fails to parse
+        import re
+
+        return bool(re.search(r"\border\s+by\b", sql, re.IGNORECASE))
+
+
 class ExecutionAccuracyEvaluator(BaseEvaluator):
     """
     Compares expected query result vs generated query result.
 
-    When both Trino executions succeed, row sets are compared after normalizing
-    column order via _sort_dataframe.
+    When both Trino executions succeed, row sets are compared.
+    If expected_sql contains an ORDER BY clause, exact_ordered match is enforced.
+    Otherwise, order_independent match (set equality) is used.
     If either execution failed, score = 0.0.
     """
 
@@ -69,6 +88,8 @@ class ExecutionAccuracyEvaluator(BaseEvaluator):
                 details={"reason": "generated_sql_execution_failed"},
             )
 
+        requires_ordering = _requires_order_by(context.expected_sql)
+
         # Sort columns and rows for column-order-invariant comparison
         exp_rows, exp_cols = _sort_dataframe(
             context.expected_result.rows, context.expected_result.columns
@@ -77,7 +98,6 @@ class ExecutionAccuracyEvaluator(BaseEvaluator):
             context.generated_result.rows, context.generated_result.columns
         )
 
-        # Build temporary QueryResults for normalised tuple conversion
         exp_qr = QueryResult(success=True, rows=exp_rows, columns=exp_cols)
         gen_qr = QueryResult(success=True, rows=gen_rows, columns=gen_cols)
 
@@ -86,10 +106,21 @@ class ExecutionAccuracyEvaluator(BaseEvaluator):
 
         col_count_match = len(exp_cols) == len(gen_cols)
         row_count_match = len(expected_tuples) == len(generated_tuples)
-        order_independent = Counter(expected_tuples) == Counter(generated_tuples)
-        exact_ordered = expected_tuples == generated_tuples
 
-        passed = col_count_match and row_count_match and order_independent
+        # Raw (un-sorted row) check for exact_ordered
+        raw_exp_tuples = context.expected_result.as_normalised_row_tuples(self._numeric_tolerance)
+        raw_gen_tuples = context.generated_result.as_normalised_row_tuples(self._numeric_tolerance)
+
+        if requires_ordering:
+            exact_ordered = (
+                context.expected_result.columns == context.generated_result.columns
+                and raw_exp_tuples == raw_gen_tuples
+            )
+            passed = col_count_match and row_count_match and exact_ordered
+        else:
+            order_independent = Counter(expected_tuples) == Counter(generated_tuples)
+            passed = col_count_match and row_count_match and order_independent
+
         score = 1.0 if passed else 0.0
 
         logger.debug(
@@ -97,7 +128,9 @@ class ExecutionAccuracyEvaluator(BaseEvaluator):
             dataset_item_id=context.dataset_item.id,
             expected_rows=len(expected_tuples),
             generated_rows=len(generated_tuples),
+            requires_ordering=requires_ordering,
             exact_ordered=exact_ordered,
+            order_independent=order_independent,
             col_count_match=col_count_match,
         )
 
@@ -108,6 +141,7 @@ class ExecutionAccuracyEvaluator(BaseEvaluator):
             details={
                 "expected_row_count": len(expected_tuples),
                 "generated_row_count": len(generated_tuples),
+                "requires_ordering": requires_ordering,
                 "exact_ordered_match": exact_ordered,
                 "order_independent_match": order_independent,
                 "col_count_match": col_count_match,

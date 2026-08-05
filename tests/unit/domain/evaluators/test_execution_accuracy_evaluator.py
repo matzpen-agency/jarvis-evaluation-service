@@ -106,3 +106,53 @@ async def test_none_results(evaluator, sample_context, sample_dataset_item):
     # No results set
     result = await evaluator.evaluate(ctx)
     assert result.score == 0.0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_order_by_enforces_exact_ordered(evaluator, sample_dataset_item):
+    """When expected_sql contains ORDER BY, scrambled rows should score 0.0."""
+    ctx = EvaluationContext(
+        dataset_item=sample_dataset_item,
+        run_id="run-x",
+        query="test",
+        expected_sql="SELECT v FROM t ORDER BY v ASC",
+        allowed_tables=[],
+    )
+    ctx.expected_result = QueryResult(
+        success=True, rows=[[1], [2], [3]], columns=["v"], row_count=3
+    )
+    ctx.generated_result = QueryResult(
+        success=True, rows=[[3], [1], [2]], columns=["v"], row_count=3
+    )
+    result = await evaluator.evaluate(ctx)
+    assert result.score == 0.0
+    assert result.passed is False
+    assert result.details["requires_ordering"] is True
+    assert result.details["exact_ordered_match"] is False
+    assert result.details["order_independent_match"] is True
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_order_by_matching_order_passes(evaluator, sample_dataset_item):
+    """When expected_sql contains ORDER BY and generated rows match exact order, score should be 1.0."""
+    ctx = EvaluationContext(
+        dataset_item=sample_dataset_item,
+        run_id="run-x",
+        query="test",
+        expected_sql="SELECT v FROM t ORDER BY v ASC",
+        allowed_tables=[],
+    )
+    ctx.expected_result = QueryResult(
+        success=True, rows=[[1], [2], [3]], columns=["v"], row_count=3
+    )
+    ctx.generated_result = QueryResult(
+        success=True, rows=[[1], [2], [3]], columns=["v"], row_count=3
+    )
+    result = await evaluator.evaluate(ctx)
+    assert result.score == 1.0
+    assert result.passed is True
+    assert result.details["requires_ordering"] is True
+    assert result.details["exact_ordered_match"] is True
+

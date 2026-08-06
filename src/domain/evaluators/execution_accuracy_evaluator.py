@@ -94,13 +94,7 @@ class ExecutionAccuracyEvaluator(BaseEvaluator):
         col_count_match = len(exp_cols) == len(gen_cols)
         row_count_match = len(expected_tuples) == len(generated_tuples)
 
-        raw_exp_tuples = context.expected_result.as_normalised_row_tuples(self._numeric_tolerance)
-        raw_gen_tuples = context.generated_result.as_normalised_row_tuples(self._numeric_tolerance)
-
-        exact_ordered = (
-            context.expected_result.columns == context.generated_result.columns
-            and raw_exp_tuples == raw_gen_tuples
-        )
+        exact_ordered = expected_tuples == generated_tuples
         order_independent = Counter(expected_tuples) == Counter(generated_tuples)
 
         if requires_ordering:

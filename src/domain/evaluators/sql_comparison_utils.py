@@ -28,13 +28,13 @@ logger = structlog.get_logger(__name__)
 
 def _requires_order_by(sql: str | None) -> bool:
     """
-    Check if the given SQL query contains an ORDER BY clause using sqlglot AST.
+    Check if the given SQL query contains an outermost ORDER BY clause using sqlglot AST.
     """
     if not sql:
         return False
     try:
         parsed = sqlglot.parse_one(sql, error_level=sqlglot.ErrorLevel.IGNORE)
-        return parsed is not None and parsed.find(exp.Order) is not None
+        return parsed is not None and parsed.args.get("order") is not None
     except Exception:
         # Fallback to regex check if sqlglot fails to parse
         return bool(re.search(r"\border\s+by\b", sql, re.IGNORECASE))

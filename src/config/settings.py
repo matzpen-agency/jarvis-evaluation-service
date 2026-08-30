@@ -32,13 +32,13 @@ class Settings(BaseSettings):
     TRINO_HOST: str = "localhost"
     TRINO_PORT: int = 8080
     TRINO_USER: str = "trino"
-    TRINO_PASSWORD: str = ""
+    TRINO_PASSWORD: SecretStr = SecretStr("")
     TRINO_CATALOG: str = "minio"
     TRINO_SCHEMA: str = "simple_retail"
     TRINO_HTTP_SCHEME: str = "http"
     TRINO_REQUEST_TIMEOUT: float = 30.0
     TRINO_ENABLED: bool = True
-    TRINO_VERIFY: bool | str = False
+    TRINO_VERIFY: bool | str = True
     TRINO_CERT_PATH: str | None = None
     TRINO_KEY_PATH: str | None = None
 

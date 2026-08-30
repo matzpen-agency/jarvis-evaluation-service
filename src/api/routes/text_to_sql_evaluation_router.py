@@ -86,5 +86,5 @@ async def run_single_dataset(
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Evaluation failed: {exc}",
+            detail="Evaluation failed.",
         ) from exc

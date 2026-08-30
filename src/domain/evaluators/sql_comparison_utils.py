@@ -16,7 +16,9 @@ Provides two core helpers used by all execution-based evaluators:
 
 from __future__ import annotations
 
+import math
 import re
+from functools import total_ordering
 from typing import Any
 
 import sqlglot
@@ -64,60 +66,97 @@ _DATE_COL_TOKENS: frozenset[str] = frozenset(
     }
 )
 
-# ── Sentinel for None / missing values — sorts last ───────────────────────────
-_NONE_SENTINEL = "\xff" * 8
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # _sort_dataframe
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Data-driven priority table: (type, priority). Checked in order; first match wins.
+# bool must precede int/float because bool is a subclass of int.
+_TYPE_PRIORITY: tuple[tuple[type, int], ...] = (
+    (bool,       1),
+    (int,        2),
+    (float,      2),
+    (str,        3),
+    (bytes,      4),
+    (list,       5),
+    (dict,       5),
+    (tuple,      5),
+)
+_PRIORITY_NULL = 99   # None
+_PRIORITY_NAN  = 98   # NaN / NaT-like
 
-def _cell_to_sort_key(value: Any) -> str:
-    """
-    Safely convert any cell value to a string sort key.
 
-    Rules:
-      - None / empty string  → high sentinel (sorts last)
-      - list / dict          → str(value)
-      - int / float          → zero-padded numeric string for lexicographic sort
-      - everything else      → str(value).lower()
+@total_ordering
+class _Comparable:
     """
-    if value is None:
-        return _NONE_SENTINEL
-    if isinstance(value, bool):
-        return str(value).lower()
-    if isinstance(value, (int, float)):
-        # Represent as 30-char zero-padded string so lex order == numeric order
-        # for non-negative values; prepend sign character for negatives.
+    Robust wrapper for any value type to ensure mathematical determinism when
+    sorting columns, safely handling ties, differing types, and NaNs.
+
+    Priority table drives comparison; equal-priority values are compared
+    natively with fallback to str representation.
+    """
+    __slots__ = ("val", "type_priority")
+
+    def __init__(self, val: Any):
+        self.val = val
+        self.type_priority = self._get_priority(val)
+
+    @staticmethod
+    def _get_priority(val: Any) -> int:
+        if val is None:
+            return _PRIORITY_NULL
+        # Detect NaN / NaT-like values without hardcoding class names
         try:
-            f = float(value)
-            if f < 0:
-                # Negate to sort ascending: more-negative = smaller key
-                return f"0{f:030.10f}"
-            return f"1{f:030.10f}"
-        except (ValueError, OverflowError):
-            return str(value)
-    if isinstance(value, (list, dict)):
-        return str(value)
-    s = str(value).strip()
-    return s if s else _NONE_SENTINEL
+            if math.isnan(val):
+                return _PRIORITY_NAN
+        except (TypeError, ValueError):
+            pass
+        for typ, priority in _TYPE_PRIORITY:
+            if isinstance(val, typ):
+                return priority
+        return 10  # Unknown type — sorts after known types, before nulls
+
+    def _cmp_value(self) -> Any:
+        """Return the raw value for comparison; NaN/None mapped to their priority."""
+        return self.val
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, _Comparable):
+            return NotImplemented
+        if self.type_priority != other.type_priority:
+            return False
+        if self.type_priority >= _PRIORITY_NAN:   # None or NaN — all equal
+            return True
+        try:
+            return bool(self.val == other.val)
+        except Exception:
+            return str(self.val) == str(other.val)
+
+    def __lt__(self, other: Any) -> bool:
+        if not isinstance(other, _Comparable):
+            return NotImplemented
+        if self.type_priority != other.type_priority:
+            return self.type_priority < other.type_priority
+        if self.type_priority >= _PRIORITY_NAN:   # None or NaN — not ordered
+            return False
+        try:
+            return bool(self.val < other.val)
+        except TypeError:
+            # Cross-type fall-through (e.g. int vs str within same priority)
+            return str(type(self.val)) < str(type(other.val))
+        except Exception:
+            return str(self.val) < str(other.val)
 
 
-def _column_sort_key(col_values: list[Any]) -> str:
+def _column_sort_key(col_values: list[Any]) -> tuple[_Comparable, ...]:
     """
-    Compute the successive-minimum signature for a column.
+    Compute the deterministic signature for a column.
 
-    The signature is the lexicographically smallest non-sentinel cell value
-    in the column.  This ensures that columns with smaller minimum values
-    sort before columns with larger minimum values — i.e. the column whose
-    data starts smallest anchors earliest in the output.
+    The signature is a sorted tuple of all values in the column wrapped in
+    _Comparable. This guarantees a mathematically deterministic column order
+    regardless of ties or naming differences.
     """
-    keys = [_cell_to_sort_key(v) for v in col_values]
-    non_sentinel = [k for k in keys if k != _NONE_SENTINEL]
-    if not non_sentinel:
-        return _NONE_SENTINEL
-    return min(non_sentinel)
+    return tuple(sorted(_Comparable(v) for v in col_values))
 
 
 def _sort_dataframe(
@@ -129,7 +168,7 @@ def _sort_dataframe(
     comparison. Preserves row sequence so ORDER BY evaluation is respected.
 
     Algorithm:
-      1. Compute a sort key for each column (successive minimum of its values).
+      1. Compute a sort key for each column (full sorted value signature).
       2. Sort columns ascending by that key (ties broken by column name).
       3. Reorder every row's values to match the new column order.
       4. Maintain the original row sequence intact.
@@ -145,8 +184,8 @@ def _sort_dataframe(
         for c in range(n_cols):
             col_values[c].append(row[c] if c < len(row) else None)
 
-    # Compute sort key per column
-    col_keys: list[tuple[str, str]] = [
+    # Compute sort key per column — (full_signature, column_name) for tie-breaking
+    col_keys: list[tuple[tuple[_Comparable, ...], str]] = [
         (_column_sort_key(col_values[c]), columns[c])
         for c in range(n_cols)
     ]

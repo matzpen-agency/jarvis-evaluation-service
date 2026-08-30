@@ -56,6 +56,7 @@ def get_settings() -> Settings:
 # ── Infrastructure factories ───────────────────────────────────────────────────
 
 
+@lru_cache
 def get_langfuse_client(
     settings: Annotated[Settings, Depends(get_settings)],
 ):
@@ -81,9 +82,9 @@ def get_query_executor(
             "request_timeout": settings.TRINO_REQUEST_TIMEOUT,
             "verify": settings.TRINO_VERIFY,
         }
-        if settings.TRINO_PASSWORD:
+        if settings.TRINO_PASSWORD.get_secret_value() if settings.TRINO_PASSWORD else "":
             kwargs["auth"] = trino.auth.BasicAuthentication(
-                settings.TRINO_USER, settings.TRINO_PASSWORD
+                settings.TRINO_USER, settings.TRINO_PASSWORD.get_secret_value() if settings.TRINO_PASSWORD else ""
             )
         if settings.TRINO_CERT_PATH and settings.TRINO_KEY_PATH:
             kwargs["cert"] = (settings.TRINO_CERT_PATH, settings.TRINO_KEY_PATH)

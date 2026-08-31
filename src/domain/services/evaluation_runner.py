@@ -255,6 +255,20 @@ class EvaluationRunner:
             logger.warning("evaluation_runner.agent_timeout", item_id=item.id)
             context.total_latency_ms = time.monotonic() * 1000 - start_ms
             results = await self._engine.run_all(context)
+            try:
+                await self._reporter.report_sample(
+                    context=context,
+                    results=results,
+                    parent_trace_id=parent_trace_id,
+                    dataset_item_id=item.id,
+                    run_name=run_name,
+                )
+            except Exception as report_exc:
+                logger.error(
+                    "evaluation_runner.report_sample_failed",
+                    item_id=item.id,
+                    error=str(report_exc),
+                )
             return SampleRecord(context=context, results=results)
         except Exception as exc:
             context.agent_crashed = True
@@ -267,6 +281,20 @@ class EvaluationRunner:
             )
             context.total_latency_ms = time.monotonic() * 1000 - start_ms
             results = await self._engine.run_all(context)
+            try:
+                await self._reporter.report_sample(
+                    context=context,
+                    results=results,
+                    parent_trace_id=parent_trace_id,
+                    dataset_item_id=item.id,
+                    run_name=run_name,
+                )
+            except Exception as report_exc:
+                logger.error(
+                    "evaluation_runner.report_sample_failed",
+                    item_id=item.id,
+                    error=str(report_exc),
+                )
             return SampleRecord(context=context, results=results)
 
         try:

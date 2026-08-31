@@ -46,6 +46,9 @@ from src.infrastructure.text_to_sql_agent.text_to_sql_agent_client import (
 from src.infrastructure.trino.trino_query_executor import TrinoQueryExecutor
 from src.ports.query_executor import QueryExecutor
 
+import trino
+import trino.auth
+import langfuse as lf_sdk
 
 @lru_cache
 def get_settings() -> Settings:
@@ -71,8 +74,6 @@ def get_query_executor(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> QueryExecutor:
     """Create and return a direct Trino query executor."""
-    import trino
-    import trino.auth
 
     def _connection_factory():
         kwargs: dict = {

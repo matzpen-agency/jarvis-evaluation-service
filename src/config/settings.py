@@ -7,7 +7,7 @@ Supports Trino mTLS, basic auth, and no-auth modes.
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -94,6 +94,16 @@ class Settings(BaseSettings):
             self.LANGFUSE_PUBLIC_KEY.get_secret_value()
             and self.LANGFUSE_SECRET_KEY.get_secret_value()
         )
+
+    @model_validator(mode="after")
+    def _validate_trino_security(self) -> Settings:
+        if self.TRINO_PASSWORD and self.TRINO_PASSWORD.get_secret_value():
+            if self.TRINO_HTTP_SCHEME.lower() != "https":
+                raise ValueError(
+                    "TRINO_HTTP_SCHEME must be 'https' when credentials (TRINO_PASSWORD) are configured. "
+                    "BasicAuthentication over plaintext HTTP is rejected."
+                )
+        return self
 
 
 settings = Settings()

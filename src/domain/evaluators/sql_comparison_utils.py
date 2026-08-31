@@ -144,7 +144,7 @@ def _sort_dataframe(
 
     Algorithm:
       1. Compute a sort key for each column (full sorted value signature).
-      2. Sort columns ascending by that key (ties broken by column name).
+      2. Sort columns ascending by that key (ties broken by original position).
       3. Reorder every row's values to match the new column order.
       4. Maintain the original row sequence intact.
     """
@@ -159,9 +159,12 @@ def _sort_dataframe(
         for c in range(n_cols):
             col_values[c].append(row[c] if c < len(row) else None)
 
-    # Compute sort key per column — (full_signature, column_name) for tie-breaking
-    col_keys: list[tuple[tuple[_Comparable, ...], str]] = [
-        (_column_sort_key(col_values[c]), columns[c])
+    # Compute sort key per column — (full_signature, original_position).
+    # Using the original index as the tie-breaker instead of column name makes
+    # the ordering name-independent: two columns with identical value signatures
+    # are interchangeable, so any stable ordering between them is valid.
+    col_keys: list[tuple[tuple[_Comparable, ...], int]] = [
+        (_column_sort_key(col_values[c]), c)
         for c in range(n_cols)
     ]
 

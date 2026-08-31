@@ -32,11 +32,13 @@ class RunDatasetRequest(BaseModel):
     )
     limit: int | None = Field(
         default=None,
+        ge=0,
         description="Optional limit on the number of cases to evaluate.",
         examples=[5],
     )
     offset: int | None = Field(
         default=None,
+        ge=0,
         description="Optional offset of cases to evaluate.",
         examples=[0],
     )

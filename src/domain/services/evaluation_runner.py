@@ -46,6 +46,7 @@ class EvaluationRunner:
         evaluation_engine: EvaluationEngine,
         metrics_aggregator: MetricsAggregator,
         max_concurrency: int = 10,
+        agent_timeout: float = 120.0,
     ) -> None:
         self._dataset_provider = dataset_provider
         self._agent_client = agent_client
@@ -54,6 +55,7 @@ class EvaluationRunner:
         self._engine = evaluation_engine
         self._aggregator = metrics_aggregator
         self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._agent_timeout = agent_timeout
 
     async def run(
         self,
@@ -163,9 +165,8 @@ class EvaluationRunner:
     ) -> SampleRecord:
         """Evaluate a single dataset item under the concurrency semaphore with timeout."""
         async with self._semaphore:
-            from src.config.settings import Settings
-            settings = Settings()
-            timeout_limit = settings.AGENT_TIMEOUT + 30.0
+            timeout_limit = self._agent_timeout + 30.0
+            item_start_ms = time.monotonic() * 1000
 
             try:
                 return await asyncio.wait_for(
@@ -180,6 +181,7 @@ class EvaluationRunner:
                     timeout=timeout_limit,
                 )
             except asyncio.TimeoutError:
+                elapsed_ms = time.monotonic() * 1000 - item_start_ms
                 logger.warning("evaluation_runner.timeout_isolated", item_id=item.id)
                 # Failure isolation: return a failed, timed-out record rather than raising
                 context = EvaluationContext(
@@ -191,6 +193,7 @@ class EvaluationRunner:
                     timed_out=True,
                     error="item_pipeline_timed_out",
                 )
+                context.total_latency_ms = elapsed_ms
                 results = await self._engine.run_all(context)
                 try:
                     await self._reporter.report_sample(
@@ -245,6 +248,28 @@ class EvaluationRunner:
                 else:
                     context.error = agent_response.error or "agent_did_not_produce_sql"
 
+        except TimeoutError:
+            context.timed_out = True
+            context.agent_call_timed_out = True
+            context.error = "agent_call_timed_out"
+            logger.warning("evaluation_runner.agent_timeout", item_id=item.id)
+            context.total_latency_ms = time.monotonic() * 1000 - start_ms
+            results = await self._engine.run_all(context)
+            return SampleRecord(context=context, results=results)
+        except Exception as exc:
+            context.agent_crashed = True
+            context.error = str(exc)
+            logger.error(
+                "evaluation_runner.agent_crashed",
+                item_id=item.id,
+                error=str(exc),
+                exc_info=True,
+            )
+            context.total_latency_ms = time.monotonic() * 1000 - start_ms
+            results = await self._engine.run_all(context)
+            return SampleRecord(context=context, results=results)
+
+        try:
             # ── Step B: Execute expected and generated SQL concurrently ────────
             if item.expected_sql and context.generated_sql:
                 expected_res, generated_res = await asyncio.gather(
@@ -257,16 +282,10 @@ class EvaluationRunner:
                 context.expected_result = await self._query_executor.execute(item.expected_sql)
             elif context.generated_sql:
                 context.generated_result = await self._query_executor.execute(context.generated_sql)
-
-        except TimeoutError:
-            context.timed_out = True
-            context.error = "agent_call_timed_out"
-            logger.warning("evaluation_runner.timeout", item_id=item.id)
         except Exception as exc:
-            context.agent_crashed = True
             context.error = str(exc)
             logger.error(
-                "evaluation_runner.item_pipeline_error",
+                "evaluation_runner.sql_execution_error",
                 item_id=item.id,
                 error=str(exc),
                 exc_info=True,
@@ -282,27 +301,21 @@ class EvaluationRunner:
             context.metadata["total_execution_time_ms"] = 0.0
             context.metadata["time_to_first_row_ms"] = 0.0
 
-        # Extract refiner iterations and token usage if available, else simulate
-        ref_iter = context.agent_response.metadata.get("refiner_iteration_count") if context.agent_response else None
-        if ref_iter is None:
-            ref_iter = 0
-            if context.generated_result and not context.generated_result.success:
-                ref_iter = 2
-            elif context.generated_sql and len(context.generated_sql) > 100:
-                ref_iter = 1
-        context.metadata["refiner_iteration_count"] = ref_iter
+        # Only include agent metadata fields that are actually observed
+        if context.agent_response:
+            ref_iter = context.agent_response.metadata.get("refiner_iteration_count")
+            if ref_iter is not None:
+                context.metadata["refiner_iteration_count"] = ref_iter
 
-        tokens = context.agent_response.metadata.get("token_usage") if context.agent_response else None
-        if tokens is None:
-            q_len = len(item.query.split())
-            sql_len = len(context.generated_sql.split()) if context.generated_sql else 0
-            tokens = q_len * 4 + sql_len * 6 + 150
-        context.metadata["token_usage"] = tokens
+            tokens = context.agent_response.metadata.get("token_usage")
+            if tokens is not None:
+                context.metadata["token_usage"] = tokens
 
-        # Add versions to metadata for Langfuse traces
-        context.metadata["model_version"] = "gpt-4o-mini"
-        context.metadata["agent_version"] = "v2.0.0"
-        context.metadata["prompt_version"] = "v1.2"
+            for key in ("model_version", "agent_version", "prompt_version", "feature_flags"):
+                val = context.agent_response.metadata.get(key)
+                if val is not None:
+                    context.metadata[key] = val
+
         context.metadata["evaluation_config"] = {"numeric_tolerance": 6}
 
         # ── Step C: Evaluate ──────────────────────────────────────────────────

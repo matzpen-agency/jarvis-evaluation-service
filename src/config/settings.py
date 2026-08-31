@@ -8,6 +8,7 @@ Supports Trino mTLS, basic auth, and no-auth modes.
 from __future__ import annotations
 
 from pydantic import Field
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,8 +22,8 @@ class Settings(BaseSettings):
     )
 
     # ── Langfuse ──────────────────────────────────────────────────────────────
-    LANGFUSE_PUBLIC_KEY: str = Field(default="", description="Langfuse public API key")
-    LANGFUSE_SECRET_KEY: str = Field(default="", description="Langfuse secret API key")
+    LANGFUSE_PUBLIC_KEY: SecretStr = Field(default=SecretStr(""), description="Langfuse public API key")
+    LANGFUSE_SECRET_KEY: SecretStr = Field(default=SecretStr(""), description="Langfuse secret API key")
     LANGFUSE_HOST: str = Field(
         default="https://cloud.langfuse.com",
         description="Langfuse server URL",
@@ -79,6 +80,7 @@ class Settings(BaseSettings):
     PORT: int = 5002
     APP_ENV: str = "development"
     LOG_LEVEL: str = "INFO"
+    CORS_ORIGINS: list[str] = Field(default=["*"], description="Allowed CORS origins")
 
     @property
     def agent_chat_url(self) -> str:
@@ -88,7 +90,10 @@ class Settings(BaseSettings):
     @property
     def is_langfuse_configured(self) -> bool:
         """True when Langfuse credentials are present."""
-        return bool(self.LANGFUSE_PUBLIC_KEY and self.LANGFUSE_SECRET_KEY)
+        return bool(
+            self.LANGFUSE_PUBLIC_KEY.get_secret_value()
+            and self.LANGFUSE_SECRET_KEY.get_secret_value()
+        )
 
 
 settings = Settings()

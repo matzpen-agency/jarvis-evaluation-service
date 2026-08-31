@@ -49,6 +49,7 @@ class EvaluationContext:
     error: str | None = None
     agent_crashed: bool = False
     timed_out: bool = False
+    agent_call_timed_out: bool = False
 
     # ── Extensible metadata ───────────────────────────────────────────────────
     metadata: dict[str, Any] = field(default_factory=dict)

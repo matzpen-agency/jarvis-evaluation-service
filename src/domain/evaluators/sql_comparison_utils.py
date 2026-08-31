@@ -51,8 +51,6 @@ _DATE_COL_TOKENS: frozenset[str] = frozenset(
         "timestamp",
         "created",
         "updated",
-        "at",
-        "on",
         "day",
         "month",
         "year",
@@ -345,14 +343,9 @@ def evaluate_contains(
         }
 
     else:
-        # ── Unordered branch: enforce 100% row count + multiset column match ──
-        if len(expected_result.rows) != len(generated_result.rows):
-            return 0.0, {
-                "reason": "row_count_mismatch",
-                "expected_row_count": len(expected_result.rows),
-                "generated_row_count": len(generated_result.rows),
-            }
-
+        # ── Unordered branch: expected-row multiset containment ───────────────────
+        # Generated may have MORE rows than expected; all expected rows must be
+        # present (multiset containment).  Extra generated rows are allowed.
         exp_cols_data = [
             [row[i] for row in exp_tuples] for i in range(n_exp_cols)
         ]
@@ -360,25 +353,16 @@ def evaluate_contains(
             [row[i] for row in gen_tuples] for i in range(n_gen_cols)
         ]
 
-        used_gen_indices: set[int] = set()
+        exp_counter = Counter(exp_tuples)
+        gen_counter = Counter(gen_tuples)
+        all_contained = all(gen_counter[row] >= cnt for row, cnt in exp_counter.items())
 
-        for exp_col in exp_cols_data:
-            exp_col_counter = Counter(exp_col)
-            matched_idx = None
-            for gen_idx, gen_col in enumerate(gen_cols_data):
-                if gen_idx in used_gen_indices:
-                    continue
-                if Counter(gen_col) == exp_col_counter:
-                    matched_idx = gen_idx
-                    break
-            if matched_idx is None:
-                return 0.0, {
-                    "reason": "column_data_not_contained",
-                    "expected_column_count": n_exp_cols,
-                    "generated_column_count": n_gen_cols,
-                    "requires_ordering": False,
-                }
-            used_gen_indices.add(matched_idx)
+        if not all_contained:
+            return 0.0, {
+                "reason": "expected_rows_not_contained",
+                "expected_row_count": len(exp_tuples),
+                "generated_row_count": len(gen_tuples),
+            }
 
         return 1.0, {
             "expected_row_count": len(exp_tuples),
@@ -569,12 +553,26 @@ def dynamically_wrap_with_yaml_cte(
     if not cte_blocks:
         return sql_query  # No date columns found anywhere — return original
 
-    with_clause = "WITH\n" + ",\n".join(cte_blocks)
-    result = f"{with_clause}\n{rewritten_sql}"
+    new_cte_str = ",\n".join(cte_blocks)
+
+    # Merge into an existing WITH clause instead of prepending a second WITH
+    # Handles: WITH [...], WITH RECURSIVE [...]
+    with_pattern = re.compile(
+        r"^(WITH\s+RECURSIVE\s+|WITH\s+)", re.IGNORECASE | re.MULTILINE
+    )
+    m = with_pattern.match(rewritten_sql.lstrip())
+    if m:
+        # Insert generated CTEs before the first existing CTE
+        insert_at = rewritten_sql.lstrip().index(m.group(0)) + len(m.group(0))
+        leading = rewritten_sql[: len(rewritten_sql) - len(rewritten_sql.lstrip())]
+        tail = rewritten_sql.lstrip()[len(m.group(0)):]
+        result = f"{leading}{m.group(0)}{new_cte_str},\n{tail}"
+    else:
+        result = f"WITH\n{new_cte_str}\n{rewritten_sql}"
 
     logger.debug(
         "sql_comparison_utils.cte_wrapped",
-        tables_wrapped=[b.split(" AS")[0].replace("WITH\n", "").strip() for b in cte_blocks],
+        tables_wrapped=[b.split(" AS")[0].strip() for b in cte_blocks],
         shift_days=shift_days,
     )
 

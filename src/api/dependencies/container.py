@@ -82,9 +82,10 @@ def get_query_executor(
             "request_timeout": settings.TRINO_REQUEST_TIMEOUT,
             "verify": settings.TRINO_VERIFY,
         }
-        if settings.TRINO_PASSWORD.get_secret_value() if settings.TRINO_PASSWORD else "":
+        trino_password = settings.TRINO_PASSWORD.get_secret_value()
+        if trino_password:
             kwargs["auth"] = trino.auth.BasicAuthentication(
-                settings.TRINO_USER, settings.TRINO_PASSWORD.get_secret_value() if settings.TRINO_PASSWORD else ""
+                settings.TRINO_USER, trino_password
             )
         if settings.TRINO_CERT_PATH and settings.TRINO_KEY_PATH:
             kwargs["cert"] = (settings.TRINO_CERT_PATH, settings.TRINO_KEY_PATH)
@@ -187,6 +188,7 @@ def get_run_dataset_use_case(
         evaluation_engine=evaluation_engine,
         metrics_aggregator=metrics_aggregator,
         max_concurrency=settings.MAX_CONCURRENT_EVALUATIONS,
+        agent_timeout=settings.AGENT_TIMEOUT,
     )
 
     return RunDatasetEvaluationUseCase(

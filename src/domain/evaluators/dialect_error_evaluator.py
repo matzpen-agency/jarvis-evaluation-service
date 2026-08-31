@@ -56,9 +56,6 @@ class DialectErrorEvaluator(BaseEvaluator):
                 "mismatched input",
                 "lexical error",
                 "parse error",
-                "line ",
-                "col ",
-                "position ",
             ]
             if any(sig in err for sig in trino_syntax_signatures):
                 dialect_err = f"Trino execution error: {context.generated_result.error}"

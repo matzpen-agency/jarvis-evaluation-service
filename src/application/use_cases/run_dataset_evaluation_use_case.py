@@ -187,25 +187,32 @@ class BackendTableResolver:
                 )
                 return []
 
-    async def get_table_schema_map(self) -> dict[str, set[str]]:
+    async def get_table_schema_map(self) -> dict[str, dict[str, str]]:
         tables = await self.get_all_tables()
-        schema_map: dict[str, set[str]] = {}
+        schema_map: dict[str, dict[str, str]] = {}
         for t in tables:
             t_name = t.get("name", "").lower().strip()
             if not t_name:
                 continue
             om_json = t.get("openmetadata_json") or {}
             columns = om_json.get("columns", [])
-            col_names = {c.get("name", "").lower().strip() for c in columns if c.get("name")}
-            schema_map[t_name] = col_names
+            
+            col_map: dict[str, str] = {}
+            for c in columns:
+                c_name = c.get("name", "").lower().strip()
+                if c_name:
+                    db_type = str(c.get("dataTypeDisplay") or c.get("dataType") or "varchar").lower()
+                    col_map[c_name] = db_type
+
+            schema_map[t_name] = col_map
 
             s_name = t.get("schema_name", "").lower().strip()
             if s_name:
-                schema_map[f"{s_name}.{t_name}"] = col_names
+                schema_map[f"{s_name}.{t_name}"] = col_map
 
             cat_name = t.get("catalog", "").lower().strip()
             if cat_name and s_name:
-                schema_map[f"{cat_name}.{s_name}.{t_name}"] = col_names
+                schema_map[f"{cat_name}.{s_name}.{t_name}"] = col_map
         return schema_map
 
     async def get_production_tables(self) -> list[str]:

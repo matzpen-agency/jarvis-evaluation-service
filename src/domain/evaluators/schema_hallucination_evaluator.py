@@ -71,12 +71,12 @@ class SchemaHallucinationEvaluator(BaseEvaluator):
                 for col in cols:
                     exists = False
                     for allowed in allowed_lower:
-                        if col in schema_map.get(allowed, set()):
+                        if col in schema_map.get(allowed, {}):
                             exists = True
                             break
                     if not exists and allowed_lower:
                         # Only report column hallucination if we resolved columns for at least one table
-                        has_metadata = any(len(schema_map.get(allowed, set())) > 0 for allowed in allowed_lower)
+                        has_metadata = any(len(schema_map.get(allowed, {})) > 0 for allowed in allowed_lower)
                         if has_metadata:
                             hallucinated_columns.append(f"unassociated.{col}")
                 continue
@@ -94,10 +94,10 @@ class SchemaHallucinationEvaluator(BaseEvaluator):
                 hallucinated_tables.append(tab)
             else:
                 # Table is allowed, check columns if schema metadata is available
-                valid_cols = schema_map.get(matched_allowed_tab, set())
+                valid_cols = schema_map.get(matched_allowed_tab, {})
                 if not valid_cols:
                     # Try qualified key in schema map
-                    valid_cols = schema_map.get(tab, set())
+                    valid_cols = schema_map.get(tab, {})
 
                 if valid_cols:
                     for col in cols:

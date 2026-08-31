@@ -71,7 +71,7 @@ class TimeShiftEvaluator(BaseEvaluator):
             )
 
         # Build schema map once for all shifts
-        schema_map: dict[str, set[str]] = {}
+        schema_map: dict[str, dict[str, str]] = {}
         if self._resolver is not None:
             try:
                 schema_map = await self._resolver.get_table_schema_map()
@@ -130,7 +130,7 @@ class TimeShiftEvaluator(BaseEvaluator):
         self,
         context: EvaluationContext,
         offset_days: int,
-        schema_map: dict[str, set[str]],
+        schema_map: dict[str, dict[str, str]],
     ) -> dict:
         """
         Wrap both SQLs with date-shifting CTEs, execute, and compare with evaluate_contains.

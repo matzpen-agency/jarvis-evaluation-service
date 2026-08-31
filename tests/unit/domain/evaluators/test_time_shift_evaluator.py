@@ -35,20 +35,41 @@ def test_cte_wrap_no_schema_map_returns_original():
 
 
 def test_cte_wrap_with_date_column():
-    """When a table has a date column, a CTE is generated and the table reference replaced."""
+    """When a table has temporal columns, they are shifted according to their DB type."""
     sql = "SELECT * FROM orders"
-    schema_map = {"orders": {"order_date", "customer_id", "amount"}}
+    schema_map = {
+        "orders": {
+            "order_date": "date", 
+            "created_at": "timestamp", 
+            "updated_ts": "unix_seconds",
+            "iso_time": "iso_timestamp",
+            "customer_id": "varchar", 
+            "amount": "double"
+        }
+    }
     result = dynamically_wrap_with_yaml_cte(sql, -7, schema_map)
-    assert "WITH" in result
-    assert "orders_cte" in result
-    assert "date_add" in result
-    assert "order_date" in result
+    result_lower = result.lower()
+    
+    assert "with" in result_lower
+    assert "__shifted_orders_1" in result_lower
+    
+    # date type -> cast(date_add('day', -7, cast(order_date as date)) as date)
+    assert "cast(date_add('day', -7, cast(order_date as date)) as date)" in result_lower
+    
+    # timestamp type -> cast(date_add('day', -7, cast(created_at as timestamp)) as timestamp)
+    assert "cast(date_add('day', -7, cast(created_at as timestamp)) as timestamp)" in result_lower
+    
+    # unix_seconds type -> (updated_ts + (-7 * 86400))
+    assert "(updated_ts + (-7 * 86400))" in result_lower
+    
+    # iso_timestamp type -> cast(date_add('day', -7, try_cast(iso_time as timestamp)) as varchar)
+    assert "cast(date_add('day', -7, try_cast(iso_time as timestamp)) as varchar)" in result_lower
 
 
 def test_cte_wrap_skips_table_with_no_date_columns():
     """Tables with no date-heuristic columns are not wrapped."""
     sql = "SELECT * FROM products"
-    schema_map = {"products": {"sku", "name", "price"}}
+    schema_map = {"products": {"sku": "varchar", "name": "varchar", "price": "double"}}
     result = dynamically_wrap_with_yaml_cte(sql, -7, schema_map)
     # No CTE because no date columns
     assert "WITH" not in result

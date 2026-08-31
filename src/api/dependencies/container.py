@@ -57,11 +57,14 @@ def get_settings() -> Settings:
 
 
 @lru_cache
-def get_langfuse_client(
-    settings: Annotated[Settings, Depends(get_settings)],
-):
-    """Create and return the Langfuse SDK client (None if unconfigured)."""
-    return create_langfuse_client(settings)
+def _get_cached_langfuse_client():
+    """Create and return the Langfuse SDK client (None if unconfigured) (Cached)."""
+    return create_langfuse_client(get_settings())
+
+
+def get_langfuse_client() -> lf_sdk.Langfuse | None:
+    """Dependency provider for Langfuse SDK client."""
+    return _get_cached_langfuse_client()
 
 
 def get_query_executor(

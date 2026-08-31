@@ -38,31 +38,8 @@ def _requires_order_by(sql: str | None) -> bool:
         parsed = sqlglot.parse_one(sql, error_level=sqlglot.ErrorLevel.IGNORE)
         return parsed is not None and parsed.args.get("order") is not None
     except Exception:
-        # Fallback to regex check if sqlglot fails to parse
-        return bool(re.search(r"\border\s+by\b", sql, re.IGNORECASE))
+        return False
 
-# ── Column heuristics ─────────────────────────────────────────────────────────
-# A column whose name contains any of these tokens is treated as a date/ts col.
-_DATE_COL_TOKENS: frozenset[str] = frozenset(
-    {
-        "date",
-        "time",
-        "ts",
-        "timestamp",
-        "created",
-        "updated",
-        "day",
-        "month",
-        "year",
-        "period",
-        "start",
-        "end",
-        "from",
-        "until",
-        "since",
-        "through",
-    }
-)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # _sort_dataframe
@@ -377,130 +354,51 @@ def evaluate_contains(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _is_date_column(col_name: str) -> bool:
-    """Return True when col_name looks like a date / timestamp column."""
-    lower = col_name.lower()
-    return any(token in lower for token in _DATE_COL_TOKENS)
+def _is_temporal_type(db_type: str) -> bool:
+    """Return True if the DB type indicates a temporal column."""
+    db_type = db_type.lower()
+    if "date" in db_type or "time" in db_type or "timestamp" in db_type:
+        return True
+    if "unix_seconds" in db_type or "unix_millis" in db_type or "epoch" in db_type:
+        return True
+    return False
 
 
-def _extract_table_names_sqlglot(sql: str) -> list[str]:
-    """Extract table names using sqlglot AST walking."""
-    try:
-        import sqlglot
-        import sqlglot.expressions as exp
-
-        parsed = sqlglot.parse_one(sql, read="trino", error_level=sqlglot.ErrorLevel.IGNORE)
-        if parsed is None:
-            return []
-        tables: list[str] = []
-        for tbl in parsed.find_all(exp.Table):
-            name = tbl.name
-            if name:
-                tables.append(name.lower())
-        return list(dict.fromkeys(tables))  # deduplicate, preserve order
-    except Exception as exc:
-        logger.debug("sql_comparison_utils.sqlglot_parse_failed", error=str(exc))
-        return []
-
-
-def _extract_table_names_regex(sql: str) -> list[str]:
-    """Fallback: extract table names using regex FROM / JOIN patterns."""
-    pattern = re.compile(
-        r"\b(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_.]*)",
-        re.IGNORECASE,
-    )
-    matches = pattern.findall(sql)
-    # Strip catalog.schema. prefixes — keep only the final table name part
-    tables = [m.split(".")[-1].lower() for m in matches]
-    return list(dict.fromkeys(tables))
-
-
-def _extract_table_names(sql: str) -> list[str]:
-    """Extract table names, preferring sqlglot with regex fallback."""
-    tables = _extract_table_names_sqlglot(sql)
-    if not tables:
-        tables = _extract_table_names_regex(sql)
-    return tables
-
-
-def _build_cte_for_table(
-    table_name: str,
-    date_cols: set[str],
-    all_cols: set[str],
-    shift_days: int,
-) -> str:
-    """
-    Build the CTE SELECT body for one table.
-
-    Date columns are wrapped in date_add(); all other columns are selected as-is.
-    We emit a SELECT * pattern using explicit column names to keep the CTE
-    compatible with all Trino versions.
-
-    When only the date columns are known (all_cols is empty), we fall back to
-    SELECT *, <shifted_cols> FROM ... which uses column shadowing — acceptable
-    as a safe fallback.
-    """
-    if not all_cols:
-        # Fallback: shift only the known date columns on top of SELECT *
-        shifted = ", ".join(
-            f"date_add('day', {shift_days}, TRY_CAST({col} AS DATE)) AS {col}"
-            for col in sorted(date_cols)
-        )
-        return (
-            f"{table_name}_cte AS (\n"
-            f"  SELECT *, {shifted}\n"
-            f"  FROM {table_name}\n"
-            f")"
-        )
-
-    select_parts: list[str] = []
-    for col in sorted(all_cols):
-        if col in date_cols:
-            select_parts.append(
-                f"  date_add('day', {shift_days}, TRY_CAST({col} AS DATE)) AS {col}"
-            )
-        else:
-            select_parts.append(f"  {col}")
-
-    select_clause = ",\n".join(select_parts)
-    return (
-        f"{table_name}_cte AS (\n"
-        f"  SELECT\n"
-        f"{select_clause}\n"
-        f"  FROM {table_name}\n"
-        f")"
-    )
-
-
-def _replace_table_ref(sql: str, table_name: str, cte_name: str) -> str:
-    """
-    Replace bare table references in the SQL with cte_name.
-
-    Handles: FROM table, JOIN table, FROM schema.table, JOIN schema.table.
-    Does NOT replace partial matches (e.g. 'orders' won't match 'orders_2024').
-    """
-    # Match the table name optionally preceded by a schema/catalog prefix
-    pattern = re.compile(
-        r"(?<!\w)(?:[a-zA-Z_][a-zA-Z0-9_.]*\.)?" + re.escape(table_name) + r"(?!\w)",
-        re.IGNORECASE,
-    )
-    return pattern.sub(cte_name, sql)
+def _generate_shift_expression(col: str, db_type: str, shift_days: int) -> str:
+    """Generate the dialect-specific shift expression for a temporal column."""
+    db_type = db_type.lower()
+    
+    if "unix_millis" in db_type or "epoch_millis" in db_type:
+        return f"({col} + ({shift_days} * 86400000))"
+    
+    if "unix_seconds" in db_type or "unix_timestamp" in db_type or "epoch" in db_type:
+        return f"({col} + ({shift_days} * 86400))"
+        
+    if "iso_timestamp" in db_type or "timestamp_string" in db_type or "varchar" in db_type:
+        return f"CAST(date_add('day', {shift_days}, try_cast({col} AS TIMESTAMP)) AS VARCHAR)"
+        
+    if db_type == "date":
+        return f"CAST(date_add('day', {shift_days}, CAST({col} AS DATE)) AS DATE)"
+        
+    # Default for timestamp, timestampz, datetime, time, etc.
+    # Note: We must strip complex type modifiers (like timestamp(3)) if we want to cast back precisely,
+    # but Trino supports casting to parameterized types.
+    return f"CAST(date_add('day', {shift_days}, CAST({col} AS TIMESTAMP)) AS {db_type})"
 
 
 def dynamically_wrap_with_yaml_cte(
     sql_query: str,
     shift_days: int,
-    table_schema_map: dict[str, set[str]],
+    table_schema_map: dict[str, dict[str, str]],
 ) -> str:
     """
     Wrap SQL table references with Trino CTEs that shift date/timestamp columns.
 
     For each table referenced in sql_query:
       - Looks up its columns in table_schema_map.
-      - Identifies date/timestamp columns by name heuristics.
-      - Generates a CTE that applies date_add('day', shift_days, ...) to those
-        columns and TRY_CASTs them to DATE.
-      - Replaces the original table name in the query with <table>_cte.
+      - Identifies temporal columns by exact DB type from the schema map.
+      - Generates a CTE that applies cast-shift-cast back to those columns.
+      - Safely replaces the table reference in the AST with the CTE alias.
 
     If shift_days == 0, the original query is returned unchanged.
     If a table has no date columns or is absent from table_schema_map, it is
@@ -509,7 +407,7 @@ def dynamically_wrap_with_yaml_cte(
     Args:
         sql_query:        Original SQL string.
         shift_days:       Number of days to shift (positive = future, negative = past).
-        table_schema_map: Mapping of table_name (lower) → set of column names (lower).
+        table_schema_map: Mapping of table_name (lower) → dict of col_name → db_type.
                           Obtain from BackendTableResolver.get_table_schema_map().
 
     Returns:
@@ -518,62 +416,101 @@ def dynamically_wrap_with_yaml_cte(
     if shift_days == 0:
         return sql_query
 
-    table_names = _extract_table_names(sql_query)
-    if not table_names:
-        logger.debug("sql_comparison_utils.no_tables_found", sql_preview=sql_query[:120])
+    import sqlglot
+    import sqlglot.expressions as exp
+
+    try:
+        parsed = sqlglot.parse_one(sql_query, read="trino")
+    except Exception as exc:
+        logger.debug("sql_comparison_utils.sqlglot_parse_failed", error=str(exc))
         return sql_query
 
-    cte_blocks: list[str] = []
-    rewritten_sql = sql_query
+    cte_counter = 1
+    tables_wrapped: list[str] = []
+    
+    # We will accumulate CTE ASTs to add
+    ctes_to_add = []
 
-    for table_name in table_names:
-        # Look up columns — try exact name, then without catalog/schema prefix
-        all_cols: set[str] = table_schema_map.get(table_name, set())
-        date_cols: set[str] = {c for c in all_cols if _is_date_column(c)}
-
-        if not date_cols:
-            logger.debug(
-                "sql_comparison_utils.no_date_cols",
-                table=table_name,
-                known_cols=list(all_cols)[:10],
-            )
+    # Find all table references
+    for table_node in list(parsed.find_all(exp.Table)):
+        table_name = table_node.name.lower()
+        if not table_name:
             continue
 
-        cte_name = f"{table_name}_cte"
-        cte_block = _build_cte_for_table(table_name, date_cols, all_cols, shift_days)
-        cte_blocks.append(cte_block)
-        rewritten_sql = _replace_table_ref(rewritten_sql, table_name, cte_name)
-        logger.debug(
-            "sql_comparison_utils.cte_built",
-            table=table_name,
-            date_cols=sorted(date_cols),
-            shift_days=shift_days,
+        # Look up schema
+        schema_dict = table_schema_map.get(table_name, {})
+        if not schema_dict:
+            # Try to resolve schema/catalog prefixes if they exist in the AST node
+            db_name = table_node.db.lower() if table_node.db else ""
+            catalog_name = table_node.catalog.lower() if table_node.catalog else ""
+            
+            candidates = []
+            if catalog_name and db_name:
+                candidates.append(f"{catalog_name}.{db_name}.{table_name}")
+            if db_name:
+                candidates.append(f"{db_name}.{table_name}")
+            
+            for cand in candidates:
+                if cand in table_schema_map:
+                    schema_dict = table_schema_map[cand]
+                    break
+                    
+        if not schema_dict:
+            continue
+            
+        temporal_cols = {col for col, dtype in schema_dict.items() if _is_temporal_type(dtype)}
+        
+        if not temporal_cols:
+            continue
+            
+        cte_name = f"__shifted_{table_name}_{cte_counter}"
+        cte_counter += 1
+        
+        # Build the SELECT elements for the CTE using type-aware shift logic
+        select_parts = []
+        for col, dtype in schema_dict.items():
+            if col in temporal_cols:
+                shift_expr = _generate_shift_expression(col, dtype, shift_days)
+                select_parts.append(f"{shift_expr} AS {col}")
+            else:
+                select_parts.append(col)
+                
+        # Build the CTE query string and parse it to AST
+        full_table_name = table_node.sql(dialect="trino") 
+        cte_query_str = f"SELECT {', '.join(select_parts)} FROM {full_table_name}"
+        
+        try:
+            cte_query_ast = sqlglot.parse_one(cte_query_str, read="trino")
+        except Exception as exc:
+            logger.error("sql_comparison_utils.cte_parse_failed", table=table_name, error=str(exc))
+            continue
+            
+        ctes_to_add.append((cte_name, cte_query_ast))
+        
+        tables_wrapped.append(table_name)
+        
+        # Replace the original table reference with the CTE name, preserving the original alias
+        original_alias = table_node.alias
+        new_alias = original_alias if original_alias else table_node.name
+        
+        new_table_node = exp.Table(
+            this=exp.to_identifier(cte_name),
+            alias=exp.TableAlias(this=exp.to_identifier(new_alias))
         )
+        
+        table_node.replace(new_table_node)
 
-    if not cte_blocks:
-        return sql_query  # No date columns found anywhere — return original
-
-    new_cte_str = ",\n".join(cte_blocks)
-
-    # Merge into an existing WITH clause instead of prepending a second WITH
-    # Handles: WITH [...], WITH RECURSIVE [...]
-    with_pattern = re.compile(
-        r"^(WITH\s+RECURSIVE\s+|WITH\s+)", re.IGNORECASE | re.MULTILINE
-    )
-    m = with_pattern.match(rewritten_sql.lstrip())
-    if m:
-        # Insert generated CTEs before the first existing CTE
-        insert_at = rewritten_sql.lstrip().index(m.group(0)) + len(m.group(0))
-        leading = rewritten_sql[: len(rewritten_sql) - len(rewritten_sql.lstrip())]
-        tail = rewritten_sql.lstrip()[len(m.group(0)):]
-        result = f"{leading}{m.group(0)}{new_cte_str},\n{tail}"
-    else:
-        result = f"WITH\n{new_cte_str}\n{rewritten_sql}"
+    if not ctes_to_add:
+        return sql_query
+        
+    # Inject CTEs into the AST using .with_()
+    for cte_name, cte_query_ast in ctes_to_add:
+        parsed = parsed.with_(cte_name, as_=cte_query_ast, append=True)
 
     logger.debug(
         "sql_comparison_utils.cte_wrapped",
-        tables_wrapped=[b.split(" AS")[0].strip() for b in cte_blocks],
+        tables_wrapped=tables_wrapped,
         shift_days=shift_days,
     )
-
-    return result
+    
+    return parsed.sql(dialect="trino")

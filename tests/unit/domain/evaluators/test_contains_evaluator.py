@@ -34,8 +34,8 @@ async def test_ex_contains_perfect_match(evaluator, sample_dataset_item):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_ex_contains_extra_columns_allowed(evaluator, sample_dataset_item):
-    """When generated has extra columns, but matches on expected columns, score = 1.0."""
+async def test_ex_contains_extra_columns_not_allowed(evaluator, sample_dataset_item):
+    """When generated has extra columns, tuple alignment fails so score = 0.0."""
     ctx = EvaluationContext(
         dataset_item=sample_dataset_item, run_id="r", query="q",
         expected_sql="SELECT 1", allowed_tables=[]
@@ -44,8 +44,8 @@ async def test_ex_contains_extra_columns_allowed(evaluator, sample_dataset_item)
     ctx.generated_result = QueryResult(success=True, rows=[[99, 1, "a"], [100, 2, "b"]], columns=["extra", "id", "name"], row_count=2)
 
     result = await evaluator.evaluate(ctx)
-    assert result.score == 1.0
-    assert result.passed is True
+    assert result.score == 0.0
+    assert result.passed is False
 
 
 @pytest.mark.unit
@@ -66,8 +66,8 @@ async def test_ex_contains_missing_columns_fails(evaluator, sample_dataset_item)
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_ex_contains_row_count_mismatch_fails(evaluator, sample_dataset_item):
-    """When row count differs, score = 0.0."""
+async def test_ex_contains_row_count_mismatch_passes_if_superset(evaluator, sample_dataset_item):
+    """When generated has extra rows (multiset superset), score = 1.0."""
     ctx = EvaluationContext(
         dataset_item=sample_dataset_item, run_id="r", query="q",
         expected_sql="SELECT 1", allowed_tables=[]
@@ -76,8 +76,8 @@ async def test_ex_contains_row_count_mismatch_fails(evaluator, sample_dataset_it
     ctx.generated_result = QueryResult(success=True, rows=[[1], [2], [3]], columns=["v"], row_count=3)
 
     result = await evaluator.evaluate(ctx)
-    assert result.score == 0.0
-    assert result.passed is False
+    assert result.score == 1.0
+    assert result.passed is True
 
 
 @pytest.mark.unit

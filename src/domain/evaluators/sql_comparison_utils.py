@@ -261,95 +261,74 @@ def evaluate_contains(
             "column_containment": True,
         }
 
+    # 1. Enforce strict row count match
+    if len(exp_tuples) != len(gen_tuples):
+        return 0.0, {
+            "reason": "row_count_mismatch",
+            "expected_row_count": len(exp_tuples),
+            "generated_row_count": len(gen_tuples),
+        }
+
+    # 2. Map columns data-wise
+    exp_cols_data = [
+        [row[i] for row in exp_tuples] for i in range(n_exp_cols)
+    ]
+    gen_cols_data = [
+        [row[i] for row in gen_tuples] for i in range(n_gen_cols)
+    ]
+
+    used_gen_indices: set[int] = set()
+    col_mapping: list[int] = []
+
+    for exp_col in exp_cols_data:
+        matched_idx = None
+        for gen_idx, gen_col in enumerate(gen_cols_data):
+            if gen_idx in used_gen_indices:
+                continue
+
+            # Since row counts are equal, check exact or multiset column equality
+            if requires_ordering:
+                is_match = gen_col == exp_col
+            else:
+                is_match = Counter(gen_col) == Counter(exp_col)
+
+            if is_match:
+                matched_idx = gen_idx
+                break
+
+        if matched_idx is None:
+            return 0.0, {
+                "reason": "expected_column_not_found_in_generated",
+                "expected_column_count": n_exp_cols,
+                "generated_column_count": n_gen_cols,
+            }
+        used_gen_indices.add(matched_idx)
+        col_mapping.append(matched_idx)
+
+    # 3. Project generated rows onto matched columns and verify
+    projected_gen = [
+        tuple(row[col_mapping[i]] for i in range(n_exp_cols))
+        for row in gen_tuples
+    ]
+
     if requires_ordering:
-        # ── Ordered subsequence branch ────────────────────────────────────────
-        # The generated rows must be an ordered subsequence of the expected rows.
-        # Row counts do NOT need to be equal.
-        # Column matching is name-agnostic: find the generated column whose
-        # ordered value list is a subsequence of the expected column's value list.
-
-        exp_cols_data = [
-            [row[i] for row in exp_tuples] for i in range(n_exp_cols)
-        ]
-        gen_cols_data = [
-            [row[i] for row in gen_tuples] for i in range(n_gen_cols)
-        ]
-
-        used_gen_indices: set[int] = set()
-        col_mapping: list[int] = []
-
-        for exp_col in exp_cols_data:
-            matched_idx = None
-            for gen_idx, gen_col in enumerate(gen_cols_data):
-                if gen_idx in used_gen_indices:
-                    continue
-                if _is_ordered_subsequence(gen_col, exp_col):
-                    matched_idx = gen_idx
-                    break
-            if matched_idx is None:
-                return 0.0, {
-                    "reason": "column_data_not_ordered_subsequence",
-                    "expected_column_count": n_exp_cols,
-                    "generated_column_count": n_gen_cols,
-                    "requires_ordering": True,
-                }
-            used_gen_indices.add(matched_idx)
-            col_mapping.append(matched_idx)
-
-        # Project generated rows onto the matched columns and verify
-        # the full multi-column row-tuples form an ordered subsequence
-        projected_gen = [
-            tuple(row[col_mapping[i]] for i in range(n_exp_cols))
-            for row in gen_tuples
-        ]
-        projected_exp = [
-            tuple(row[i] for i in range(n_exp_cols))
-            for row in exp_tuples
-        ]
-
-        if not _is_ordered_subsequence(projected_gen, projected_exp):
-            return 0.0, {
-                "reason": "generated_rows_not_ordered_subsequence",
-                "expected_row_count": len(exp_tuples),
-                "generated_row_count": len(gen_tuples),
-                "requires_ordering": True,
-            }
-
-        return 1.0, {
-            "expected_row_count": len(exp_tuples),
-            "generated_row_count": len(gen_tuples),
-            "requires_ordering": True,
-            "column_containment": True,
-        }
-
+        passed = projected_gen == exp_tuples
     else:
-        # ── Unordered branch: expected-row multiset containment ───────────────────
-        # Generated may have MORE rows than expected; all expected rows must be
-        # present (multiset containment).  Extra generated rows are allowed.
-        exp_cols_data = [
-            [row[i] for row in exp_tuples] for i in range(n_exp_cols)
-        ]
-        gen_cols_data = [
-            [row[i] for row in gen_tuples] for i in range(n_gen_cols)
-        ]
+        passed = Counter(projected_gen) == Counter(exp_tuples)
 
-        exp_counter = Counter(exp_tuples)
-        gen_counter = Counter(gen_tuples)
-        all_contained = all(gen_counter[row] >= cnt for row, cnt in exp_counter.items())
-
-        if not all_contained:
-            return 0.0, {
-                "reason": "expected_rows_not_contained",
-                "expected_row_count": len(exp_tuples),
-                "generated_row_count": len(gen_tuples),
-            }
-
-        return 1.0, {
+    if not passed:
+        return 0.0, {
+            "reason": "projected_rows_do_not_match",
             "expected_row_count": len(exp_tuples),
             "generated_row_count": len(gen_tuples),
-            "requires_ordering": False,
-            "column_containment": True,
         }
+
+    return 1.0, {
+        "expected_row_count": len(exp_tuples),
+        "generated_row_count": len(gen_tuples),
+        "requires_ordering": requires_ordering,
+        "column_containment": True,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

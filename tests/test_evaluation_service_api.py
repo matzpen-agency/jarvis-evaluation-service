@@ -95,3 +95,38 @@ async def test_run_single_dataset_endpoint(mock_agent_client, mock_backend_resol
     args, kwargs = mock_agent_client.call_args
     assert kwargs["query"] == "Show me the data"
     assert kwargs["allowed_tables"] == ["minio.test_schema.test_table"]
+
+
+@pytest.fixture
+def mock_mcp_agent_client():
+    with patch("src.infrastructure.text_to_sql_agent.mcp_agent_client.McpAgentClient.run", new_callable=AsyncMock) as mock_run:
+        mock_run.return_value = AgentResponse(
+            thread_id="test_mcp_thread",
+            status="completed",
+            sql_query="SELECT * FROM minio.test_schema.test_table",
+            sql_explanation="Mock MCP explanation",
+        )
+        yield mock_run
+
+
+@pytest.mark.asyncio
+async def test_run_new_evaluation_endpoint(mock_mcp_agent_client, mock_langfuse_dataset, mock_db_evaluator, mock_query_executor):
+    payload = {
+        "dataset_name": "text2sql_sandbox_test-table-id",
+        "connection_id": 89,
+    }
+    
+    response = client.post("/text-to-sql/evaluation/run-new-evaluation", json=payload)
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert "accuracy" in data
+    assert data["total_cases"] == 1
+    assert data["accuracy"]["contains_accuracy"] == 1.0
+    assert data["failure_rate"] == 0.0
+    
+    # Verify the mocked MCP agent was called with connection_id
+    mock_mcp_agent_client.assert_called_once()
+    args, kwargs = mock_mcp_agent_client.call_args
+    assert kwargs["query"] == "Show me the data"
+    assert kwargs["connection_id"] == 89

@@ -63,6 +63,13 @@ class SchemaHallucinationEvaluator(BaseEvaluator):
         hallucinated_columns: list[str] = []
 
         allowed_lower = {t.lower().strip() for t in context.allowed_tables}
+        if not allowed_lower:
+            return EvaluationResult(
+                evaluator_name=self.name,
+                score=1.0,
+                passed=True,
+                details={"reason": "dynamic_connection_mode_no_table_whitelist"},
+            )
 
         # Check references
         for tab, cols in referenced.items():

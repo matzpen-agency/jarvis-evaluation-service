@@ -43,6 +43,10 @@ from src.infrastructure.langfuse.text_to_sql_dataset_item_parser import (
 from src.infrastructure.text_to_sql_agent.text_to_sql_agent_client import (
     TextToSqlAgentClient,
 )
+from src.infrastructure.text_to_sql_agent.mcp_agent_client import McpAgentClient
+from src.application.use_cases.run_mcp_dataset_evaluation_use_case import (
+    RunMcpDatasetEvaluationUseCase,
+)
 from src.infrastructure.trino.trino_query_executor import TrinoQueryExecutor
 from src.ports.query_executor import QueryExecutor
 
@@ -199,3 +203,35 @@ def get_run_dataset_use_case(
         runner=runner,
         backend_table_resolver=resolver,
     )
+
+
+def get_run_mcp_dataset_use_case(
+    settings: Annotated[Settings, Depends(get_settings)],
+    langfuse_client: Annotated[Any, Depends(get_langfuse_client)],
+    query_executor: Annotated[QueryExecutor, Depends(get_query_executor)],
+    evaluation_engine: Annotated[EvaluationEngine, Depends(get_evaluation_engine)],
+    metrics_aggregator: Annotated[MetricsAggregator, Depends(get_metrics_aggregator)],
+) -> RunMcpDatasetEvaluationUseCase:
+    """Wire MCP agent dependencies and return the configured use case."""
+
+    parser = TextToSqlDatasetItemParser()
+    dataset_provider = LangfuseDatasetProvider(
+        client=langfuse_client,
+        parser=parser,
+        query_executor=query_executor,
+    )
+    agent_client = McpAgentClient(settings=settings)
+    reporter = LangfuseReporter(client=langfuse_client)
+
+    runner = EvaluationRunner(
+        dataset_provider=dataset_provider,
+        agent_client=agent_client,
+        query_executor=query_executor,
+        reporter=reporter,
+        evaluation_engine=evaluation_engine,
+        metrics_aggregator=metrics_aggregator,
+        max_concurrency=settings.MAX_CONCURRENT_EVALUATIONS,
+        agent_timeout=settings.AGENT_TIMEOUT,
+    )
+
+    return RunMcpDatasetEvaluationUseCase(runner=runner)

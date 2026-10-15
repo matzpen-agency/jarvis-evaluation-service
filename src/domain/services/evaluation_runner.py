@@ -65,6 +65,7 @@ class EvaluationRunner:
         question_ids: list[str] | None = None,
         limit: int | None = None,
         offset: int | None = None,
+        agent_kwargs: dict | None = None,
     ) -> DatasetRun:
         """
         Execute full evaluation of a named dataset.
@@ -125,6 +126,7 @@ class EvaluationRunner:
                 dataset_name=dataset_name,
                 run_name=run_name,
                 parent_trace_id=trace_id,
+                agent_kwargs=agent_kwargs or {},
             )
             for item in items
         ]
@@ -162,6 +164,7 @@ class EvaluationRunner:
         dataset_name: str,
         run_name: str,
         parent_trace_id: str,
+        agent_kwargs: dict | None = None,
     ) -> SampleRecord:
         """Evaluate a single dataset item under the concurrency semaphore with timeout."""
         async with self._semaphore:
@@ -177,6 +180,7 @@ class EvaluationRunner:
                         dataset_name=dataset_name,
                         run_name=run_name,
                         parent_trace_id=parent_trace_id,
+                        agent_kwargs=agent_kwargs or {},
                     ),
                     timeout=timeout_limit,
                 )
@@ -190,6 +194,7 @@ class EvaluationRunner:
                     query=item.query,
                     expected_sql=item.expected_sql,
                     allowed_tables=allowed_tables,
+                    connection_id=(agent_kwargs or {}).get("connection_id"),
                     timed_out=True,
                     error="item_pipeline_timed_out",
                 )
@@ -215,6 +220,7 @@ class EvaluationRunner:
         dataset_name: str,
         run_name: str,
         parent_trace_id: str,
+        agent_kwargs: dict | None = None,
     ) -> SampleRecord:
         """
         Full pipeline for a single dataset item:
@@ -227,6 +233,7 @@ class EvaluationRunner:
             query=item.query,
             expected_sql=item.expected_sql,
             allowed_tables=allowed_tables,
+            connection_id=(agent_kwargs or {}).get("connection_id"),
         )
 
         try:
@@ -235,6 +242,7 @@ class EvaluationRunner:
             agent_response = await self._agent_client.run(
                 query=item.query,
                 allowed_tables=allowed_tables,
+                **(agent_kwargs or {}),
             )
             context.agent_response = agent_response
             context.generated_sql = agent_response.sql_query

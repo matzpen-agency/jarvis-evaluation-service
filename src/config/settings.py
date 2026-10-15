@@ -43,10 +43,16 @@ class Settings(BaseSettings):
     TRINO_CERT_PATH: str | None = None
     TRINO_KEY_PATH: str | None = None
 
-    # ── Agent ─────────────────────────────────────────────────────────────────
+    # ── Agent (legacy REST chat endpoint) ───────────────────────────────────────
     AGENT_URL: str = "http://localhost:8000"
     AGENT_ENDPOINT: str = "/api/agent/chat"
     AGENT_TIMEOUT: float = 120.0
+
+    # ── MCP Agent (text2sql-onboarding, new connection_id-based interface) ───────
+    # Base URL of the agent's MCP server (e.g. http://localhost:8001)
+    MCP_AGENT_URL: str = "http://localhost:8001"
+    # Numeric connection ID passed to chat_with_agent (matches JEEN_METADATA_CONNECTION_ID)
+    MCP_AGENT_CONNECTION_ID: int = 0
 
     # ── Backend (for resolving production tables and query execution) ─────────
     BACKEND_URL: str = "http://localhost:8000"

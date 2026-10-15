@@ -32,6 +32,7 @@ class EvaluationContext:
     query: str
     expected_sql: str
     allowed_tables: list[str]
+    connection_id: int | None = None
 
     # ── Agent output ──────────────────────────────────────────────────────────
     agent_response: AgentResponse | None = None

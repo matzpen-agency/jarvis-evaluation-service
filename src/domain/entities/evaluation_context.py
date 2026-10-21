@@ -34,9 +34,20 @@ class EvaluationContext:
     allowed_tables: list[str]
     connection_id: int | None = None
 
+    # ── Connection metadata (resolved once per run) ───────────────────────────
+    # sqlglot dialect of the connection's database (expected SQL is written in it)
+    dialect: str | None = None
+    # sqlglot dialect the agent writes its SQL in
+    agent_dialect: str = "trino"
+    # table → {column: db_type}, keyed by "table", "schema.table" (lower-case)
+    schema_map: dict[str, dict[str, str]] = field(default_factory=dict)
+
     # ── Agent output ──────────────────────────────────────────────────────────
     agent_response: AgentResponse | None = None
     generated_sql: str | None = None
+    # The form of generated_sql that was actually executed (it differs when the
+    # agent's SQL had to be transpiled to the connection's dialect)
+    executed_generated_sql: str | None = None
 
     # ── Execution results ─────────────────────────────────────────────────────
     expected_result: QueryResult | None = None

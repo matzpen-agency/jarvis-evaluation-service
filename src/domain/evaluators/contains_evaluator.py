@@ -1,8 +1,10 @@
 """
 contains_evaluator.py — Checks whether generated results contain expected results.
 
-Useful when generated SQL returns a broader superset of the expected rows.
-Score = match_percentage (0.0-1.0). Passes when all expected rows are present.
+PRIMARY METRIC. The generated result passes when it contains every expected
+column (matched by data, not by name; extra generated columns are allowed)
+and its rows match the expected rows 100% — in order when the expected SQL
+has an outer ORDER BY. Score is 1.0 or 0.0.
 """
 
 from __future__ import annotations
@@ -12,24 +14,19 @@ import structlog
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
 from src.domain.evaluators.base_evaluator import BaseEvaluator
-from src.domain.evaluators.sql_comparison_utils import (
-    _requires_order_by,
-    evaluate_contains,
-)
+from src.domain.evaluators.sql_comparison_utils import evaluate_execution_match
 
 logger = structlog.get_logger(__name__)
-
-PASS_THRESHOLD = 1.0  # all expected rows must be present
 
 
 class ContainsEvaluator(BaseEvaluator):
     """
-    Checks whether every expected result row is present in the generated result.
+    Checks that the generated result contains the expected result.
 
     Returns:
-      - score = 1.0 when all expected rows found (full subset)
-      - score = overlap / expected when partially matched
-      - score = 0.0 when nothing matched or execution failed
+      - score = 1.0 when all expected columns are found and all rows match
+      - score = 0.0 otherwise (details["reason"] says why)
+      - not applicable when the golden SQL itself fails to execute
     """
 
     def __init__(self, numeric_tolerance: int = 6) -> None:
@@ -41,31 +38,20 @@ class ContainsEvaluator(BaseEvaluator):
 
     async def evaluate(self, context: EvaluationContext) -> EvaluationResult:
         try:
-            return self._evaluate(context)
+            result = evaluate_execution_match(
+                context,
+                self.name,
+                allow_extra_columns=True,
+                numeric_tolerance=self._numeric_tolerance,
+            )
         except Exception as exc:
             logger.error("contains_evaluator.error", error=str(exc))
             return EvaluationResult.from_error(self.name, str(exc))
 
-    def _evaluate(self, context: EvaluationContext) -> EvaluationResult:
-        requires_ordering = _requires_order_by(context.expected_sql)
-        score, details = evaluate_contains(
-            expected_result=context.expected_result,
-            generated_result=context.generated_result,
-            numeric_tolerance=self._numeric_tolerance,
-            requires_ordering=requires_ordering,
-        )
-        passed = score >= PASS_THRESHOLD
-
         logger.debug(
             "contains_evaluator.result",
             dataset_item_id=context.dataset_item.id,
-            passed=passed,
-            score=score,
+            passed=result.passed,
+            score=result.score,
         )
-
-        return EvaluationResult(
-            evaluator_name=self.name,
-            score=score,
-            passed=passed,
-            details=details,
-        )
+        return result

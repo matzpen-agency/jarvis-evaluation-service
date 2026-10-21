@@ -105,40 +105,38 @@ async def test_report_sample(mock_langfuse_sdk_client, sample_dataset_item):
         run_name="my-run-name",
     )
 
-    mock_langfuse_sdk_client.start_span.assert_any_call(
-        name="eval-sample:item-001",
-        input={
-            "query": "show orders",
-            "expected_sql": "SELECT * FROM orders",
-            "allowed_tables": ["orders"],
-        },
-        output={
-            "generated_sql": "SELECT * FROM orders",
-            "succeeded": True,
-            "scores": {"execution_accuracy": 1.0},
-        },
-        metadata={
-            "total_latency_ms": 0.0,
-            "agent_latency_ms": 0.0,
-            "agent_crashed": False,
-            "timed_out": False,
-            "error": None,
-            "expected_row_count": 0,
-            "generated_row_count": 0,
-        },
+    sample_call = next(
+        c for c in mock_langfuse_sdk_client.start_span.call_args_list
+        if c.kwargs.get("name") == "eval-sample:item-001"
     )
+    trace_id = sample_call.kwargs["trace_context"]["trace_id"]
+    assert sample_call.kwargs["input"] == {
+        "query": "show orders",
+        "expected_sql": "SELECT * FROM orders",
+        "allowed_tables": ["orders"],
+        "connection_id": None,
+    }
+    output = sample_call.kwargs["output"]
+    assert output["generated_sql"] == "SELECT * FROM orders"
+    assert output["expected_sql"] == "SELECT * FROM orders"
+    assert output["generated_output"]["success"] is True
+    assert output["scores"] == {"execution_accuracy": 1.0}
+    assert output["evaluations"]["execution_accuracy"]["passed"] is True
+    assert sample_call.kwargs["metadata"]["agent_crashed"] is False
 
-    # Verify child spans and scores created
-    mock_langfuse_sdk_client.start_span.assert_any_call(
-        trace_context={"trace_id": "mocked-trace-id", "parent_span_id": "mocked-span-id"},
-        name="agent_execution",
-        input={"query": "show orders", "allowed_tables": ["orders"]},
-        output={"sql_query": "SELECT * FROM orders", "status": "completed"},
-        metadata={"latency_ms": 0.0, "agent_crashed": False, "timed_out": False},
+    # Child spans hang off the same trace
+    agent_call = next(
+        c for c in mock_langfuse_sdk_client.start_span.call_args_list
+        if c.kwargs.get("name") == "agent_execution"
     )
+    assert agent_call.kwargs["trace_context"] == {
+        "trace_id": trace_id,
+        "parent_span_id": "mocked-span-id",
+    }
+    assert agent_call.kwargs["output"]["sql_query"] == "SELECT * FROM orders"
 
     mock_langfuse_sdk_client.create_score.assert_called_with(
-        trace_id="mocked-trace-id",
+        trace_id=trace_id,
         name="execution_accuracy",
         value=1.0,
         comment="passed=True",
@@ -147,6 +145,126 @@ async def test_report_sample(mock_langfuse_sdk_client, sample_dataset_item):
 
     # Verify linking request is made
     mock_langfuse_sdk_client.api.dataset_run_items.create.assert_called_once()
+    request = mock_langfuse_sdk_client.api.dataset_run_items.create.call_args.kwargs["request"]
+    assert request.dataset_item_id == "item-001"
+    assert request.trace_id == trace_id
+
+
+def _sample_context(sample_dataset_item) -> EvaluationContext:
+    ctx = EvaluationContext(
+        dataset_item=sample_dataset_item,
+        run_id="run-123",
+        query="show orders",
+        expected_sql="SELECT * FROM orders",
+        allowed_tables=[],
+    )
+    ctx.generated_sql = "SELECT * FROM orders"
+    return ctx
+
+
+class _ApiError(Exception):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"status_code: {status_code}")
+        self.status_code = status_code
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_link_is_retried_after_transient_failure(mock_langfuse_sdk_client, sample_dataset_item):
+    create = mock_langfuse_sdk_client.api.dataset_run_items.create
+    create.side_effect = [ConnectionError("Name or service not known"), None]
+    reporter = LangfuseReporter(client=mock_langfuse_sdk_client, link_retry_base_seconds=0)
+
+    await reporter.report_sample(
+        context=_sample_context(sample_dataset_item),
+        results=[],
+        parent_trace_id="p",
+        dataset_item_id="item-001",
+        run_name="run",
+    )
+
+    assert create.call_count == 2
+    assert reporter._failed_links == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_link_not_retried_on_client_error(mock_langfuse_sdk_client, sample_dataset_item):
+    create = mock_langfuse_sdk_client.api.dataset_run_items.create
+    create.side_effect = _ApiError(404)
+    reporter = LangfuseReporter(client=mock_langfuse_sdk_client, link_retry_base_seconds=0)
+
+    await reporter.report_sample(
+        context=_sample_context(sample_dataset_item),
+        results=[],
+        parent_trace_id="p",
+        dataset_item_id="item-001",
+        run_name="run",
+    )
+
+    assert create.call_count == 1
+    assert reporter._failed_links == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_failed_links_are_retried_on_flush(mock_langfuse_sdk_client, sample_dataset_item):
+    create = mock_langfuse_sdk_client.api.dataset_run_items.create
+    create.side_effect = [ConnectionError("down")] * 2 + [None]
+    reporter = LangfuseReporter(
+        client=mock_langfuse_sdk_client, link_max_attempts=2, link_retry_base_seconds=0
+    )
+
+    await reporter.report_sample(
+        context=_sample_context(sample_dataset_item),
+        results=[],
+        parent_trace_id="p",
+        dataset_item_id="item-001",
+        run_name="run",
+    )
+    assert len(reporter._failed_links) == 1
+
+    await reporter.flush()
+    assert create.call_count == 3
+    assert reporter._failed_links == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_item_is_linked_even_if_span_creation_fails(mock_langfuse_sdk_client, sample_dataset_item):
+    mock_langfuse_sdk_client.start_span.side_effect = TypeError("not JSON serialisable")
+    reporter = LangfuseReporter(client=mock_langfuse_sdk_client, link_retry_base_seconds=0)
+
+    await reporter.report_sample(
+        context=_sample_context(sample_dataset_item),
+        results=[],
+        parent_trace_id="p",
+        dataset_item_id="item-001",
+        run_name="run",
+    )
+
+    mock_langfuse_sdk_client.api.dataset_run_items.create.assert_called_once()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_not_applicable_results_are_not_scored(mock_langfuse_sdk_client, sample_dataset_item):
+    reporter = LangfuseReporter(client=mock_langfuse_sdk_client)
+    results = [
+        EvaluationResult.not_applicable("time_shift", "no_temporal_columns_to_shift"),
+        EvaluationResult.from_error("component_match", "boom"),
+    ]
+
+    await reporter.report_sample(
+        context=_sample_context(sample_dataset_item),
+        results=results,
+        parent_trace_id="p",
+        dataset_item_id="item-001",
+        run_name="run",
+    )
+
+    scored = [c.kwargs["name"] for c in mock_langfuse_sdk_client.create_score.call_args_list]
+    assert scored == ["component_match"]  # errors count as 0, N/A is skipped
 
 
 @pytest.mark.integration

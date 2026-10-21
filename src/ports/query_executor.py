@@ -23,12 +23,14 @@ class QueryExecutor(ABC):
     """
 
     @abstractmethod
-    async def execute(self, sql: str) -> QueryResult:
+    async def execute(self, sql: str, connection_id: int | None = None) -> QueryResult:
         """
         Execute a SQL query and return structured results.
 
         Args:
             sql: SQL statement to execute (SELECT only for safety).
+            connection_id: Data connection to run against. Executors bound to a
+                single database ignore it.
 
         Returns:
             QueryResult with rows, columns, timing and error info.

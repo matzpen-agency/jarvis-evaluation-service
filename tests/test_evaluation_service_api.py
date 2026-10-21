@@ -63,7 +63,11 @@ def mock_db_evaluator():
 
 @pytest.fixture
 def mock_query_executor():
-    with patch("src.infrastructure.trino.trino_query_executor.TrinoQueryExecutor.execute", new_callable=AsyncMock) as mock_exec:
+    # Keep the test independent of a developer .env: with a Jeen key set, SQL
+    # would otherwise run on a real Jeen connection
+    with patch(
+        "src.api.dependencies.container._get_cached_jeen_client", return_value=None
+    ), patch("src.infrastructure.trino.trino_query_executor.TrinoQueryExecutor.execute", new_callable=AsyncMock) as mock_exec:
         mock_exec.return_value = QueryResult(
             success=True,
             rows=[[1]],

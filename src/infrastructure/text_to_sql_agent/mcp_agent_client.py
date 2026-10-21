@@ -23,6 +23,7 @@ import structlog
 
 from src.config.settings import Settings
 from src.domain.entities.agent_response import AgentResponse
+from src.infrastructure.mcp.mcp_http_client import McpHttpClient
 from src.ports.agent_client import AgentClient
 
 logger = structlog.get_logger(__name__)
@@ -169,10 +170,42 @@ class McpAgentClient(AgentClient):
         MCP_AGENT_USE_SSE=true and we fall back to the two-step SSE approach.
         """
         messages_url = f"{self._base_url}/mcp"
-        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.post(messages_url, json=payload, headers=headers)
+            # 1. Initialize session with FastMCP Streamable HTTP
+            init_payload = {
+                "jsonrpc": "2.0",
+                "id": "init-1",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "eval-client", "version": "1.0"},
+                },
+            }
+            init_res = await client.post(messages_url, json=init_payload, headers=headers)
+            init_res.raise_for_status()
+
+            session_id = init_res.headers.get("mcp-session-id")
+            session_headers = (
+                {**headers, "mcp-session-id": session_id} if session_id else headers
+            )
+
+            # 2. Send initialized notification
+            await client.post(
+                messages_url,
+                json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+                headers=session_headers,
+            )
+
+            # 3. Call tool
+            response = await client.post(
+                messages_url, json=payload, headers=session_headers
+            )
             response.raise_for_status()
 
             content_type = response.headers.get("content-type", "")
@@ -184,16 +217,11 @@ class McpAgentClient(AgentClient):
 
     @staticmethod
     def _parse_sse_response(text: str) -> dict:
-        """Extract the JSON-RPC result from a raw SSE response body."""
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("data:"):
-                data = line[len("data:"):].strip()
-                if data and data != "[DONE]":
-                    try:
-                        return json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
+        """Extract the JSON-RPC response from a raw SSE body (skipping notifications)."""
+        messages = McpHttpClient.parse_sse_messages(text)
+        for message in messages:
+            if "result" in message or "error" in message:
+                return message
         raise McpAgentError("No valid data event found in SSE response")
 
     @staticmethod
@@ -207,6 +235,14 @@ class McpAgentClient(AgentClient):
             if isinstance(block, dict) and block.get("type") == "text":
                 text_content = block.get("text")
                 break
+
+        if result.get("isError"):
+            # The tool raised: FastMCP returns the exception text, not JSON
+            return AgentResponse(
+                thread_id=thread_id,
+                status="error",
+                error=f"agent tool error: {(text_content or 'unknown error')[:1000]}",
+            )
 
         if text_content:
             try:
@@ -229,7 +265,6 @@ class McpAgentClient(AgentClient):
             schema_plan=data.get("schema_plan"),
             summary=data.get("summary"),
             raw_data_ref=data.get("raw_data_ref"),
-            succeeded=succeeded,
             error=error_msg,
             metadata={
                 "execution_path": data.get("execution_path", []),

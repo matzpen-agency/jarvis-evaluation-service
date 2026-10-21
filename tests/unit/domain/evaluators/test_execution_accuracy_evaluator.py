@@ -31,12 +31,7 @@ async def test_exact_match_scores_1(evaluator, sample_context):
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_order_independent_match(evaluator, sample_context, sample_dataset_item):
-    """Results in different row order should still score 1.0.
-
-    After _sort_dataframe normalization, both sides are sorted identically,
-    so order_independent_match and exact_ordered_match are both True.
-    This is the desired behaviour: the evaluator is now fully order-invariant.
-    """
+    """Without ORDER BY in the expected SQL, row order doesn't matter."""
     ctx = EvaluationContext(
         dataset_item=sample_dataset_item,
         run_id="run-x",
@@ -52,8 +47,7 @@ async def test_order_independent_match(evaluator, sample_context, sample_dataset
     )
     result = await evaluator.evaluate(ctx)
     assert result.score == 1.0
-    assert result.details["order_independent_match"] is True
-    assert result.details["exact_ordered_match"] is False
+    assert result.details["requires_ordering"] is False
 
 
 @pytest.mark.unit
@@ -77,7 +71,7 @@ async def test_mismatch_scores_0(evaluator, sample_context, sample_dataset_item)
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_failed_expected_execution(evaluator, sample_context, sample_dataset_item):
-    """When expected SQL fails, score should be 0.0."""
+    """When expected SQL fails the metric is not applicable (golden SQL is broken)."""
     ctx = EvaluationContext(
         dataset_item=sample_dataset_item,
         run_id="run-x",
@@ -89,6 +83,7 @@ async def test_failed_expected_execution(evaluator, sample_context, sample_datas
     ctx.generated_result = QueryResult(success=True, rows=[[1]], columns=["v"], row_count=1)
     result = await evaluator.evaluate(ctx)
     assert result.score == 0.0
+    assert result.applicable is False
     assert "expected_sql_execution_failed" in result.details.get("reason", "")
 
 
@@ -129,8 +124,7 @@ async def test_order_by_enforces_exact_ordered(evaluator, sample_dataset_item):
     assert result.score == 0.0
     assert result.passed is False
     assert result.details["requires_ordering"] is True
-    assert result.details["exact_ordered_match"] is False
-    assert result.details["order_independent_match"] is True
+    assert result.details["reason"] == "row_order_mismatch"
 
 
 @pytest.mark.unit
@@ -154,5 +148,4 @@ async def test_order_by_matching_order_passes(evaluator, sample_dataset_item):
     assert result.score == 1.0
     assert result.passed is True
     assert result.details["requires_ordering"] is True
-    assert result.details["exact_ordered_match"] is True
 

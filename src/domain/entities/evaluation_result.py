@@ -18,6 +18,9 @@ class EvaluationResult:
     details  — Evaluator-specific breakdown data (e.g., match_percentage,
                shift_scores, similarity_scores).
     error    — Non-None when the evaluator itself raised an exception.
+    applicable — False when the metric cannot be judged for this sample (for
+               example the golden SQL itself fails to execute). Non-applicable
+               results are excluded from averages and not sent as scores.
     """
 
     evaluator_name: str
@@ -25,6 +28,18 @@ class EvaluationResult:
     passed: bool
     details: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    applicable: bool = True
+
+    @classmethod
+    def not_applicable(cls, evaluator_name: str, reason: str, **details: Any) -> EvaluationResult:
+        """Create a result for a sample this metric cannot judge."""
+        return cls(
+            evaluator_name=evaluator_name,
+            score=0.0,
+            passed=False,
+            details={"reason": reason, **details},
+            applicable=False,
+        )
 
     @classmethod
     def from_error(cls, evaluator_name: str, error: str) -> EvaluationResult:

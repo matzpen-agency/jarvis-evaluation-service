@@ -144,8 +144,9 @@ class MetricsAggregator:
                 generated_sql=r.context.generated_sql,
                 expected_sql=r.context.expected_sql,
                 succeeded=r.context.succeeded,
-                error=r.context.error,
-                scores={res.evaluator_name: res.score for res in r.results},
+                error=r.context.error or self._expected_sql_error(r.context),
+                scores={res.evaluator_name: res.score for res in r.results if res.applicable},
+                not_applicable=[res.evaluator_name for res in r.results if not res.applicable],
             )
             for r in records
         ]
@@ -180,21 +181,32 @@ class MetricsAggregator:
             cases=cases,
         )
 
+    @staticmethod
+    def _expected_sql_error(context: EvaluationContext) -> str | None:
+        if context.expected_result is not None and not context.expected_result.success:
+            return f"expected_sql_execution_failed: {context.expected_result.error}"
+        return None
+
     def _compute_accuracy_stats(
         self, all_results: list[list[EvaluationResult]]
     ) -> AccuracyStats:
-        """Average each evaluator's score across all samples."""
+        """
+        Average each evaluator's score across the samples it could judge.
+        Not-applicable results (e.g. the golden SQL failed) are excluded.
+        """
+        counts: dict[str, int] = {}
 
         def _avg(evaluator_name: str) -> float:
             scores = [
                 r.score
                 for results in all_results
                 for r in results
-                if r.evaluator_name == evaluator_name
+                if r.evaluator_name == evaluator_name and r.applicable
             ]
+            counts[evaluator_name] = len(scores)
             return round(sum(scores) / len(scores), 4) if scores else 0.0
 
-        return AccuracyStats(
+        stats = AccuracyStats(
             execution_accuracy=_avg("execution_accuracy"),
             contains_accuracy=_avg("contains_accuracy"),
             sql_exact_match=_avg("sql_exact_match"),
@@ -204,3 +216,5 @@ class MetricsAggregator:
             dialect_error=_avg("dialect_error"),
             composite_score=0.0,  # filled in by caller
         )
+        stats.evaluated_counts = counts
+        return stats

@@ -31,7 +31,7 @@ class BackendQueryExecutor(QueryExecutor):
         self._timeout = timeout
         self._enabled = enabled
 
-    async def execute(self, sql: str) -> QueryResult:
+    async def execute(self, sql: str, connection_id: int | None = None) -> QueryResult:
         """
         Execute SQL query via the backend REST API.
         """

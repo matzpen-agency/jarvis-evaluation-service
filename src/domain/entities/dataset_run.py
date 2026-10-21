@@ -33,6 +33,8 @@ class AccuracyStats:
     schema_hallucination: float = 0.0
     dialect_error: float = 0.0
     composite_score: float = 0.0
+    # evaluator name → number of samples it could judge (not-applicable excluded)
+    evaluated_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -98,6 +100,8 @@ class DatasetCaseResult:
     succeeded: bool = False
     error: str | None = None
     scores: dict[str, float] = field(default_factory=dict)
+    # evaluators that could not judge this case (e.g. golden SQL failed)
+    not_applicable: list[str] = field(default_factory=list)
 
 
 @dataclass

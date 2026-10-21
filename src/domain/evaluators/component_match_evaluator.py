@@ -1,58 +1,191 @@
 """
-component_match_evaluator.py — Evaluates SQL clause similarity using AST parsing via sqlglot.
+component_match_evaluator.py — Clause-level SQL similarity using sqlglot ASTs.
 
-Improvements over v1:
-  - Added HAVING and LIMIT clauses.
-  - Handles queries with multiple SELECT nodes (subqueries, CTEs, UNIONs) by
-    collecting ALL Select nodes via find_all() and averaging scores across them.
-  - List-type clauses (SELECT columns, GROUP BY, ORDER BY) are compared as sets
-    so that column order differences don't cause false failures.
-  - JOIN clauses continue to use set-based comparison (order-independent).
+Each query is broken into components, collected over every SELECT in it
+(main query, CTEs, subqueries, UNION branches):
+
+  select   projected expressions (output aliases ignored)
+  from     tables read in FROM and JOIN (catalog/schema qualifiers ignored)
+  join     JOIN ON conditions, split into AND-ed predicates
+  where    WHERE predicates, split into AND-ed predicates
+  group    GROUP BY expressions
+  having   HAVING predicates, split into AND-ed predicates
+  order    ORDER BY expressions with direction
+  limit    LIMIT value
+
+Table aliases are resolved to table names (f.salesamount and
+factinternetsales.salesamount are the same column) and symmetric comparisons
+are canonicalised (a = b equals b = a).
+
+Each clause gets an F1 score (partial credit for partially matching lists).
+Clauses that neither query uses are skipped, so a two-clause query isn't
+inflated by six "matching" empty clauses. Score = mean clause F1.
 """
 
 from __future__ import annotations
 
-import structlog
-import sqlglot
+import functools
+from collections import Counter
+from typing import Any
+
 import sqlglot.expressions as exp
+import structlog
 
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
 from src.domain.evaluators.base_evaluator import BaseEvaluator
+from src.domain.evaluators.sql_comparison_utils import node_arg, safe_parse
 
 logger = structlog.get_logger(__name__)
 
-# All SQL clauses evaluated per SELECT node.
-# Each maps to the sqlglot Select.args key used to retrieve the AST node.
-CLAUSE_ARG_KEYS: dict[str, str] = {
-    "select":  "expressions",   # list of selected expressions
-    "from":    "from",          # FROM clause
-    "join":    "joins",         # list of JOIN nodes
-    "where":   "where",         # WHERE predicate
-    "group":   "group",         # GROUP BY
-    "having":  "having",        # HAVING predicate
-    "order":   "order",         # ORDER BY
-    "limit":   "limit",         # LIMIT / FETCH
-}
+CLAUSES: tuple[str, ...] = (
+    "select",
+    "from",
+    "join",
+    "where",
+    "group",
+    "having",
+    "order",
+    "limit",
+)
 
-# Clauses whose nodes form unordered sets (column order should not matter).
-SET_BASED_CLAUSES: frozenset[str] = frozenset({"select", "group", "join"})
+_SYMMETRIC_OPERATORS = (exp.EQ, exp.NEQ, exp.NullSafeEQ, exp.NullSafeNEQ)
+_MAX_DIFF_ITEMS = 10
+
+
+def _resolve_output_reference(
+    node: exp.Expression,
+    projections: list[exp.Expression],
+    output_aliases: dict[str, exp.Expression],
+) -> exp.Expression:
+    """GROUP BY 1 / ORDER BY total → the projected expression they refer to."""
+    if isinstance(node, exp.Literal) and node.is_int:
+        idx = int(node.this) - 1
+        if 0 <= idx < len(projections):
+            return projections[idx]
+    if isinstance(node, exp.Column) and not node.table:
+        return output_aliases.get(node.name.lower(), node)
+    return node
+
+
+def _split_conjuncts(predicate: exp.Expression | None) -> list[exp.Expression]:
+    if predicate is None:
+        return []
+    if isinstance(predicate, exp.Where | exp.Having):
+        predicate = predicate.this
+    while isinstance(predicate, exp.Paren):
+        predicate = predicate.this
+    if isinstance(predicate, exp.And):
+        return _split_conjuncts(predicate.this) + _split_conjuncts(predicate.expression)
+    return [predicate]
+
+
+class _ComponentExtractor:
+    """Extracts normalised clause components from one SQL query."""
+
+    def __init__(self, parsed: exp.Expression, dialect: str | None) -> None:
+        self._dialect = dialect
+        self._aliases: dict[str, str] = {}
+        for table in parsed.find_all(exp.Table):
+            if table.alias:
+                self._aliases[table.alias.lower()] = table.name.lower()
+        self._parsed = parsed
+
+    def extract(self) -> dict[str, Counter[str]]:
+        components: dict[str, Counter[str]] = {c: Counter() for c in CLAUSES}
+        for select in self._parsed.find_all(exp.Select):
+            projections = [p.unalias() for p in select.expressions]
+            output_aliases = {
+                p.alias.lower(): p.unalias() for p in select.expressions if p.alias
+            }
+            resolve = functools.partial(
+                _resolve_output_reference,
+                projections=projections,
+                output_aliases=output_aliases,
+            )
+
+            for projection in projections:
+                components["select"][self._norm(projection)] += 1
+
+            from_clause = node_arg(select, "from")
+            if from_clause is not None:
+                components["from"][self._source_name(from_clause.this)] += 1
+
+            for join in select.args.get("joins") or []:
+                components["from"][self._source_name(join.this)] += 1
+                for predicate in _split_conjuncts(join.args.get("on")):
+                    components["join"][self._norm(predicate)] += 1
+
+            for predicate in _split_conjuncts(select.args.get("where")):
+                components["where"][self._norm(predicate)] += 1
+
+            group = select.args.get("group")
+            if group is not None:
+                for expression in group.expressions:
+                    components["group"][self._norm(resolve(expression))] += 1
+
+            for predicate in _split_conjuncts(select.args.get("having")):
+                components["having"][self._norm(predicate)] += 1
+
+            order = select.args.get("order")
+            if order is not None:
+                for ordered in order.expressions:
+                    direction = "desc" if ordered.args.get("desc") else "asc"
+                    key = self._norm(resolve(ordered.this))
+                    components["order"][f"{key} {direction}"] += 1
+
+            limit = select.args.get("limit")
+            if limit is not None:
+                value = limit.expression if limit.expression is not None else limit.this
+                components["limit"][self._norm(value) if value is not None else ""] += 1
+
+        # ORDER BY / LIMIT of a UNION live on the set operation, not a SELECT
+        if isinstance(self._parsed, exp.SetOperation):
+            order = self._parsed.args.get("order")
+            if order is not None:
+                for ordered in order.expressions:
+                    direction = "desc" if ordered.args.get("desc") else "asc"
+                    components["order"][f"{self._norm(ordered.this)} {direction}"] += 1
+        return components
+
+    def _source_name(self, source: exp.Expression | None) -> str:
+        if isinstance(source, exp.Table):
+            return source.name.lower()
+        return "<subquery>"
+
+    def _norm(self, node: exp.Expression) -> str:
+        node = node.copy()
+        for column in node.find_all(exp.Column):
+            table = column.table.lower()
+            if table:
+                column.set("table", exp.to_identifier(self._aliases.get(table, table)))
+            column.set("db", None)
+            column.set("catalog", None)
+        for operator in list(node.find_all(*_SYMMETRIC_OPERATORS)):
+            left = operator.this.sql(dialect=self._dialect).lower()
+            right = operator.expression.sql(dialect=self._dialect).lower()
+            if left > right:
+                this, other = operator.this, operator.expression
+                operator.set("this", other)
+                operator.set("expression", this)
+        return node.sql(dialect=self._dialect).lower().strip()
+
+
+def _f1(expected: Counter[str], generated: Counter[str]) -> float:
+    if not expected and not generated:
+        return 1.0
+    if not expected or not generated:
+        return 0.0
+    overlap = sum((expected & generated).values())
+    if overlap == 0:
+        return 0.0
+    precision = overlap / sum(generated.values())
+    recall = overlap / sum(expected.values())
+    return 2 * precision * recall / (precision + recall)
 
 
 class ComponentMatchEvaluator(BaseEvaluator):
-    """
-    Compares expected vs generated SQL at clause level using sqlglot AST parsing.
-
-    Supports multi-SELECT queries (subqueries, CTEs, UNIONs):
-      - Collects all Select nodes from both ASTs.
-      - Matches them positionally and averages clause scores.
-      - If query A has more Select nodes than query B, unmatched ones count as 0.
-
-    Clause comparison:
-      - SET_BASED_CLAUSES: converted to a frozenset of SQL strings — column/join
-        order does not affect the score.
-      - Other clauses: exact SQL string comparison (preserves ORDER BY sequence).
-    """
+    """Compares expected vs generated SQL clause by clause."""
 
     @property
     def name(self) -> str:
@@ -67,12 +200,7 @@ class ComponentMatchEvaluator(BaseEvaluator):
 
     def _evaluate(self, context: EvaluationContext) -> EvaluationResult:
         if not context.expected_sql:
-            return EvaluationResult(
-                evaluator_name=self.name,
-                score=0.0,
-                passed=False,
-                details={"reason": "no_expected_sql"},
-            )
+            return EvaluationResult.not_applicable(self.name, "no_expected_sql")
         if not context.generated_sql:
             return EvaluationResult(
                 evaluator_name=self.name,
@@ -81,10 +209,11 @@ class ComponentMatchEvaluator(BaseEvaluator):
                 details={"reason": "no_generated_sql"},
             )
 
-        parsed_exp = self._safe_parse(context.expected_sql)
-        parsed_gen = self._safe_parse(context.generated_sql)
-
-        if not parsed_exp or not parsed_gen:
+        parsed_exp = safe_parse(context.expected_sql, context.dialect)
+        parsed_gen = safe_parse(context.generated_sql, context.agent_dialect, context.dialect)
+        if parsed_exp is None:
+            return EvaluationResult.not_applicable(self.name, "expected_sql_parsing_failed")
+        if parsed_gen is None:
             return EvaluationResult(
                 evaluator_name=self.name,
                 score=0.0,
@@ -92,103 +221,36 @@ class ComponentMatchEvaluator(BaseEvaluator):
                 details={"reason": "sql_parsing_failed"},
             )
 
-        # Collect ALL Select nodes (handles subqueries, CTEs, UNIONs)
-        exp_selects: list[exp.Select] = list(parsed_exp.find_all(exp.Select))
-        gen_selects: list[exp.Select] = list(parsed_gen.find_all(exp.Select))
+        # Render both in one dialect so equivalent syntax compares equal
+        render_dialect = context.dialect or context.agent_dialect
+        exp_components = _ComponentExtractor(parsed_exp, render_dialect).extract()
+        gen_components = _ComponentExtractor(parsed_gen, render_dialect).extract()
 
-        if not exp_selects and not gen_selects:
-            return EvaluationResult(
-                evaluator_name=self.name,
-                score=1.0,
-                passed=True,
-                details={"reason": "no_select_nodes_in_either"},
-            )
+        clause_scores: dict[str, float] = {}
+        differences: dict[str, Any] = {}
+        for clause in CLAUSES:
+            expected, generated = exp_components[clause], gen_components[clause]
+            if not expected and not generated:
+                continue
+            clause_scores[clause] = round(_f1(expected, generated), 4)
+            if clause_scores[clause] < 1.0:
+                differences[clause] = {
+                    "missing": list((expected - generated).elements())[:_MAX_DIFF_ITEMS],
+                    "extra": list((generated - expected).elements())[:_MAX_DIFF_ITEMS],
+                }
 
-        # Match SELECT nodes positionally; pad with None for unmatched ones
-        max_len = max(len(exp_selects), len(gen_selects))
-        exp_selects += [None] * (max_len - len(exp_selects))
-        gen_selects += [None] * (max_len - len(gen_selects))
-
-        all_clause_scores: list[dict[str, float]] = []
-
-        for exp_select, gen_select in zip(exp_selects, gen_selects):
-            clause_scores: dict[str, float] = {}
-            for clause_name, arg_key in CLAUSE_ARG_KEYS.items():
-                clause_scores[clause_name] = self._compare_clause(
-                    clause_name, arg_key, exp_select, gen_select
-                )
-            all_clause_scores.append(clause_scores)
-
-        # Aggregate: average across all SELECT nodes, then across all clauses
-        n_clauses = len(CLAUSE_ARG_KEYS)
-        total_score = sum(
-            sum(cs.values()) / n_clauses
-            for cs in all_clause_scores
-        ) / max_len
-
-        avg_score = round(total_score, 4)
-        passed = avg_score >= 1.0
-
-        details: dict = {
-            "composite_score": avg_score,
-            "select_node_count": max_len,
-        }
-        if max_len == 1:
-            # Single SELECT: surface per-clause scores directly for readability
-            details["clause_scores"] = all_clause_scores[0]
-        else:
-            details["per_select_clause_scores"] = all_clause_scores
-
+        score = (
+            round(sum(clause_scores.values()) / len(clause_scores), 4)
+            if clause_scores
+            else 1.0
+        )
         return EvaluationResult(
             evaluator_name=self.name,
-            score=avg_score,
-            passed=passed,
-            details=details,
+            score=score,
+            passed=score >= 1.0,
+            details={
+                "composite_score": score,
+                "clause_scores": clause_scores,
+                "differences": differences,
+            },
         )
-
-    def _safe_parse(self, sql: str) -> exp.Expression | None:
-        try:
-            return sqlglot.parse_one(sql, read="trino")
-        except Exception:
-            try:
-                return sqlglot.parse_one(sql)
-            except Exception:
-                return None
-
-    def _compare_clause(
-        self,
-        clause_name: str,
-        arg_key: str,
-        exp_select: exp.Select | None,
-        gen_select: exp.Select | None,
-    ) -> float:
-        # Both missing → perfect match (neither query uses this clause)
-        if not exp_select and not gen_select:
-            return 1.0
-        # One missing → mismatch
-        if not exp_select or not gen_select:
-            return 0.0
-
-        exp_node = exp_select.args.get(arg_key)
-        gen_node = gen_select.args.get(arg_key)
-
-        # Both clause nodes absent → both queries omit this clause
-        if not exp_node and not gen_node:
-            return 1.0
-        # Only one has the clause → structural mismatch
-        if not exp_node or not gen_node:
-            return 0.0
-
-        # Normalise to list
-        exp_list = exp_node if isinstance(exp_node, list) else [exp_node]
-        gen_list = gen_node if isinstance(gen_node, list) else [gen_node]
-
-        exp_sqls = [n.sql(pretty=False).lower().strip() for n in exp_list if n]
-        gen_sqls = [n.sql(pretty=False).lower().strip() for n in gen_list if n]
-
-        if clause_name in SET_BASED_CLAUSES:
-            # Order-independent comparison (SELECT columns, GROUP BY, JOINs)
-            return 1.0 if set(exp_sqls) == set(gen_sqls) else 0.0
-
-        # Ordered comparison (WHERE, HAVING, ORDER BY, LIMIT, FROM)
-        return 1.0 if exp_sqls == gen_sqls else 0.0

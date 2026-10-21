@@ -1,28 +1,38 @@
 """
-schema_hallucination_evaluator.py — Evaluates whether the generated SQL references non-existent tables/columns.
+schema_hallucination_evaluator.py — Detects tables/columns in the generated SQL
+that don't exist in the connection's schema.
+
+The schema comes from the connection metadata (context.schema_map, falling
+back to the table resolver). References are resolved per query scope with
+sqlglot, so table aliases, CTE names, subquery columns and SELECT aliases
+used in ORDER BY are not mistaken for hallucinations.
+
+Score: 1.0 when every referenced table and column exists, 0.0 otherwise.
+Not applicable when no schema metadata is available or there is no SQL.
 """
 
 from __future__ import annotations
 
-import structlog
-import sqlglot
-import sqlglot.expressions as exp
 from typing import Any
+
+import sqlglot.expressions as exp
+import structlog
+from sqlglot.optimizer.scope import traverse_scope
 
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
 from src.domain.evaluators.base_evaluator import BaseEvaluator
+from src.domain.evaluators.sql_comparison_utils import safe_parse
 
 logger = structlog.get_logger(__name__)
 
+_DERIVED = object()  # a source whose columns we can't check (CTE, subquery, UNNEST)
+
 
 class SchemaHallucinationEvaluator(BaseEvaluator):
-    """
-    Detects table and column hallucinations by comparing referenced objects in the generated SQL
-    against the allowed schema and column metadata fetched from the backend.
-    """
+    """Flags generated SQL that references non-existent tables or columns."""
 
-    def __init__(self, table_resolver: Any) -> None:
+    def __init__(self, table_resolver: Any = None) -> None:
         self._resolver = table_resolver
 
     @property
@@ -38,124 +48,118 @@ class SchemaHallucinationEvaluator(BaseEvaluator):
 
     async def _evaluate(self, context: EvaluationContext) -> EvaluationResult:
         if not context.generated_sql:
-            return EvaluationResult(
-                evaluator_name=self.name,
-                score=0.0,
-                passed=False,
-                details={"reason": "no_generated_sql"},
-            )
+            return EvaluationResult.not_applicable(self.name, "no_generated_sql")
 
-        # 1. Fetch the catalog/schema map from the backend resolver
-        column_check_available = True
-        try:
-            schema_map = await self._resolver.get_table_schema_map()
-            if not schema_map:
-                column_check_available = False
-        except Exception as exc:
-            logger.warning("schema_hallucination.resolver_failed", error=str(exc))
-            schema_map = {}
-            column_check_available = False
+        schema = self._lower_schema(await self._schema_map(context))
+        if not schema:
+            return EvaluationResult.not_applicable(self.name, "schema_metadata_unavailable")
 
-        # 2. Extract referenced tables and columns from the generated query
-        referenced = self._extract_tables_and_columns(context.generated_sql)
+        parsed = safe_parse(context.generated_sql, context.agent_dialect, context.dialect)
+        if parsed is None:
+            return EvaluationResult.not_applicable(self.name, "sql_parsing_failed")
 
-        hallucinated_tables: list[str] = []
-        hallucinated_columns: list[str] = []
+        hallucinated_tables: set[str] = set()
+        hallucinated_columns: set[str] = set()
+        referenced: dict[str, set[str]] = {}
 
-        allowed_lower = {t.lower().strip() for t in context.allowed_tables}
-        if not allowed_lower:
-            return EvaluationResult(
-                evaluator_name=self.name,
-                score=1.0,
-                passed=True,
-                details={"reason": "dynamic_connection_mode_no_table_whitelist"},
-            )
+        for scope in traverse_scope(parsed):
+            sources: dict[str, Any] = {}
+            for alias, (_, source) in scope.selected_sources.items():
+                if isinstance(source, exp.Table):
+                    columns = self._lookup(source, schema)
+                    if columns is None:
+                        hallucinated_tables.add(self._display_name(source))
+                    else:
+                        referenced.setdefault(source.name.lower(), set())
+                    sources[alias.lower()] = (source.name.lower(), columns)
+                else:
+                    sources[alias.lower()] = (alias.lower(), _DERIVED)
 
-        # Check references
-        for tab, cols in referenced.items():
-            if not tab:
-                # Unassociated columns: check if they exist in any of the allowed tables
-                for col in cols:
-                    exists = False
-                    for allowed in allowed_lower:
-                        if col in schema_map.get(allowed, {}):
-                            exists = True
-                            break
-                    if not exists and allowed_lower:
-                        # Only report column hallucination if we resolved columns for at least one table
-                        has_metadata = any(len(schema_map.get(allowed, {})) > 0 for allowed in allowed_lower)
-                        if has_metadata:
-                            hallucinated_columns.append(f"unassociated.{col}")
-                continue
+            select_aliases = set()
+            if isinstance(scope.expression, exp.Select):
+                select_aliases = {
+                    p.alias.lower() for p in scope.expression.expressions if p.alias
+                }
 
-            # Verify table is allowed (case-insensitive, matching simple or qualified name)
-            is_allowed = False
-            matched_allowed_tab = None
-            for allowed in allowed_lower:
-                if tab == allowed or tab.endswith(f".{allowed}"):
-                    is_allowed = True
-                    matched_allowed_tab = allowed
-                    break
+            for column in scope.columns:
+                if isinstance(column.this, exp.Star):
+                    continue
+                name = column.name.lower()
+                qualifier = column.table.lower()
+                if qualifier:
+                    if qualifier not in sources:
+                        continue  # correlated reference to an outer scope
+                    table_name, columns = sources[qualifier]
+                    if columns is None or columns is _DERIVED:
+                        continue
+                    referenced[table_name].add(name)
+                    if name not in columns:
+                        hallucinated_columns.add(f"{table_name}.{name}")
+                    continue
 
-            if not is_allowed:
-                hallucinated_tables.append(tab)
-            else:
-                # Table is allowed, check columns if schema metadata is available
-                valid_cols = schema_map.get(matched_allowed_tab, {})
-                if not valid_cols:
-                    # Try qualified key in schema map
-                    valid_cols = schema_map.get(tab, {})
+                if name in select_aliases and not any(
+                    isinstance(cols, set) and name in cols for _, cols in sources.values()
+                ):
+                    continue  # e.g. ORDER BY revenue → SUM(...) AS revenue
+                known = [(t, cols) for t, cols in sources.values() if isinstance(cols, set)]
+                if not known or any(cols is _DERIVED for _, cols in sources.values()):
+                    continue
+                owners = [t for t, cols in known if name in cols]
+                if owners:
+                    referenced[owners[0]].add(name)
+                elif len(known) == len(sources):
+                    hallucinated_columns.add(name)
 
-                if valid_cols:
-                    for col in cols:
-                        if col not in valid_cols:
-                            hallucinated_columns.append(f"{tab}.{col}")
-
-        score = 1.0 if not hallucinated_tables and not hallucinated_columns else 0.0
-        passed = score == 1.0
-
+        passed = not hallucinated_tables and not hallucinated_columns
         return EvaluationResult(
             evaluator_name=self.name,
-            score=score,
+            score=1.0 if passed else 0.0,
             passed=passed,
             details={
-                "hallucinated_tables": hallucinated_tables,
-                "hallucinated_columns": hallucinated_columns,
-                "referenced_tables_columns": {t: list(c) for t, c in referenced.items()},
-                "column_check_available": column_check_available,
+                "hallucinated_tables": sorted(hallucinated_tables),
+                "hallucinated_columns": sorted(hallucinated_columns),
+                "referenced_tables_columns": {t: sorted(c) for t, c in referenced.items()},
             },
         )
 
-    def _extract_tables_and_columns(self, sql: str) -> dict[str, set[str]]:
+    async def _schema_map(self, context: EvaluationContext) -> dict:
+        if context.schema_map:
+            return context.schema_map
+        if self._resolver is None:
+            return {}
         try:
-            parsed = sqlglot.parse_one(sql, read="trino")
-        except Exception:
-            try:
-                parsed = sqlglot.parse_one(sql)
-            except Exception:
-                return {}
+            return await self._resolver.get_table_schema_map(context.connection_id)
+        except Exception as exc:
+            logger.warning("schema_hallucination.resolver_failed", error=str(exc))
+            return {}
 
-        referenced: dict[str, set[str]] = {}
-        tables = [t.name.lower().strip() for t in parsed.find_all(exp.Table)]
-        for t in tables:
-            referenced[t] = set()
+    @staticmethod
+    def _lower_schema(schema_map: dict) -> dict[str, set[str]]:
+        return {
+            str(table).lower(): {str(c).lower() for c in columns}
+            for table, columns in (schema_map or {}).items()
+        }
 
-        for c in parsed.find_all(exp.Column):
-            col_name = c.name.lower().strip()
-            tab_name = c.text("table").lower().strip()
+    @staticmethod
+    def _lookup(table: exp.Table, schema: dict[str, set[str]]) -> set[str] | None:
+        """
+        Columns of the referenced table, or None if it doesn't exist.
 
-            if tab_name:
-                if tab_name in referenced:
-                    referenced[tab_name].add(col_name)
-                else:
-                    # Handle schema name matching or nested tables
-                    referenced[tab_name] = {col_name}
-            else:
-                if len(tables) == 1:
-                    referenced[tables[0]].add(col_name)
-                else:
-                    if "" not in referenced:
-                        referenced[""] = set()
-                    referenced[""].add(col_name)
+        A schema-qualified reference must match the schema; the catalog is
+        ignored because it names the engine-side catalog (e.g. Trino's
+        "postgres"), not part of the connection's own schema.
+        """
+        name = table.name.lower()
+        db = (table.db or "").lower()
+        if db:
+            qualified = schema.get(f"{db}.{name}")
+            if qualified is not None:
+                return qualified
+            has_schema_keys = any(k.endswith(f".{name}") for k in schema)
+            return None if has_schema_keys else schema.get(name)
+        return schema.get(name)
 
-        return referenced
+    @staticmethod
+    def _display_name(table: exp.Table) -> str:
+        parts = [table.catalog, table.db, table.name]
+        return ".".join(p for p in parts if p).lower()

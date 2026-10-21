@@ -49,5 +49,5 @@ def create_trino_connection(settings: Settings) -> trino.dbapi.Connection:
         http_scheme=settings.TRINO_HTTP_SCHEME,
         auth=auth,
         request_timeout=settings.TRINO_REQUEST_TIMEOUT,
-        verify=settings.TRINO_VERIFY,
+        verify=False if str(settings.TRINO_VERIFY).lower() in ("false", "0", "no", "off") else settings.TRINO_VERIFY,
     )

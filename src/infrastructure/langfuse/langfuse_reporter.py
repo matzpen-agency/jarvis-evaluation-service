@@ -16,6 +16,8 @@ Trace hierarchy:
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from typing import Any
 
 import langfuse as lf_sdk
@@ -27,6 +29,7 @@ from langfuse.api.resources.dataset_run_items.types.create_dataset_run_item_requ
 from src.domain.entities.dataset_run import DatasetRun
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
+from src.domain.entities.query_result import QueryResult
 from src.ports.trace_reporter import TraceReporter
 
 logger = structlog.get_logger(__name__)
@@ -39,9 +42,18 @@ class LangfuseReporter(TraceReporter):
     Gracefully degrades when the Langfuse client is None (disabled).
     """
 
-    def __init__(self, client: lf_sdk.Langfuse | None) -> None:
+    def __init__(
+        self,
+        client: lf_sdk.Langfuse | None,
+        link_max_attempts: int = 4,
+        link_retry_base_seconds: float = 1.0,
+    ) -> None:
         self._client = client
         self._run_spans: dict[str, Any] = {}
+        self._link_max_attempts = link_max_attempts
+        self._link_retry_base = link_retry_base_seconds
+        # Links that still failed after retries; retried once more on flush()
+        self._failed_links: list[CreateDatasetRunItemRequest] = []
 
     @property
     def _enabled(self) -> bool:
@@ -89,28 +101,31 @@ class LangfuseReporter(TraceReporter):
         if not self._enabled:
             return
 
+        # Fixed up front so the item can be linked to the dataset run even if
+        # building the spans fails — every item must appear in the experiment.
+        trace_id = uuid.uuid4().hex
+        observation_id: str | None = None
         try:
             # ── Sample-level trace ────────────────────────────────────────────
+            sample_output = self._build_sample_output(context, results)
             sample_span = self._client.start_span(  # type: ignore[union-attr]
                 name=f"eval-sample:{context.dataset_item.id}",
+                trace_context={"trace_id": trace_id},
                 input={
                     "query": context.query,
                     "expected_sql": context.expected_sql,
                     "allowed_tables": context.allowed_tables,
+                    "connection_id": context.connection_id,
                 },
-                output=self._build_sample_output(context, results),
+                output=sample_output,
                 metadata=self._build_sample_metadata(context),
             )
+            observation_id = sample_span.id
             status_tag = "passed" if context.succeeded else "failed"
             sample_span.update_trace(
                 tags=["evaluation", "text-to-sql", "sample", status_tag],
-                output={
-                    "generated_sql": context.generated_sql,
-                    "succeeded": context.succeeded,
-                    "scores": {r.evaluator_name: r.score for r in results},
-                },
+                output=sample_output,
             )
-            trace_id = sample_span.trace_id
 
             # ── Agent execution span ──────────────────────────────────────────
             agent_span = self._client.start_span(  # type: ignore[union-attr]
@@ -120,6 +135,7 @@ class LangfuseReporter(TraceReporter):
                 output={
                     "sql_query": context.generated_sql,
                     "status": context.agent_response.status if context.agent_response else "error",
+                    "error": context.error,
                 },
                 metadata={
                     "latency_ms": context.agent_latency_ms,
@@ -129,17 +145,13 @@ class LangfuseReporter(TraceReporter):
             )
             agent_span.end()
 
-            # ── Trino execution spans ─────────────────────────────────────────
+            # ── SQL execution spans ───────────────────────────────────────────
             if context.expected_result is not None:
                 exp_span = self._client.start_span(  # type: ignore[union-attr]
                     trace_context={"trace_id": trace_id, "parent_span_id": sample_span.id},
-                    name="trino_expected_execution",
+                    name="expected_sql_execution",
                     input={"sql": context.expected_sql},
-                    output={
-                        "success": context.expected_result.success,
-                        "row_count": context.expected_result.row_count,
-                        "error": context.expected_result.error,
-                    },
+                    output=self._format_query_result(context.expected_result),
                     metadata={"execution_time_ms": context.expected_result.execution_time_ms},
                 )
                 exp_span.end()
@@ -147,45 +159,46 @@ class LangfuseReporter(TraceReporter):
             if context.generated_result is not None:
                 gen_span = self._client.start_span(  # type: ignore[union-attr]
                     trace_context={"trace_id": trace_id, "parent_span_id": sample_span.id},
-                    name="trino_generated_execution",
-                    input={"sql": context.generated_sql},
-                    output={
-                        "success": context.generated_result.success,
-                        "row_count": context.generated_result.row_count,
-                        "error": context.generated_result.error,
-                    },
+                    name="generated_sql_execution",
+                    input={"sql": context.executed_generated_sql or context.generated_sql},
+                    output=self._format_query_result(context.generated_result),
                     metadata={"execution_time_ms": context.generated_result.execution_time_ms},
                 )
                 gen_span.end()
 
             # ── Evaluator scores ──────────────────────────────────────────────
             for result in results:
-                if result.error is None:
-                    self._client.create_score(  # type: ignore[union-attr]
-                        trace_id=trace_id,
-                        name=result.evaluator_name,
-                        value=result.score,
-                        comment=f"passed={result.passed}",
-                        data_type="NUMERIC",
-                    )
+                if not result.applicable:
+                    continue  # excluded from averages, so not scored either
+                comment = f"passed={result.passed}"
+                if result.error:
+                    comment = f"evaluator error: {result.error}"[:500]
+                elif result.details.get("reason"):
+                    comment += f"; reason={result.details['reason']}"
+                self._client.create_score(  # type: ignore[union-attr]
+                    trace_id=trace_id,
+                    name=result.evaluator_name,
+                    value=result.score,
+                    comment=comment,
+                    data_type="NUMERIC",
+                )
 
             sample_span.end()
-
-            # ── Link sample trace to dataset run ──────────────────────────────
-            self._link_to_dataset_run(
-                dataset_item_id=dataset_item_id,
-                trace_id=trace_id,
-                run_name=run_name,
-                metadata={"parent_run_trace_id": parent_trace_id},
-                observation_id=sample_span.id,
-            )
-
         except Exception as exc:
             logger.error(
                 "langfuse_reporter.report_sample_failed",
                 item_id=context.dataset_item.id,
                 error=str(exc),
             )
+
+        # ── Link sample trace to dataset run ──────────────────────────────────
+        await self._link_to_dataset_run(
+            dataset_item_id=dataset_item_id,
+            trace_id=trace_id,
+            run_name=run_name,
+            metadata={"parent_run_trace_id": parent_trace_id},
+            observation_id=observation_id,
+        )
 
     async def report_run_summary(self, run: DatasetRun, trace_id: str) -> None:
         """Write aggregate run metrics as scores on the top-level trace."""
@@ -253,9 +266,20 @@ class LangfuseReporter(TraceReporter):
             logger.error("langfuse_reporter.summary_failed", error=str(exc))
 
     async def flush(self) -> None:
-        """Flush all pending Langfuse events."""
+        """Flush all pending Langfuse events and retry links that failed."""
         if not self._enabled:
             return
+        if self._failed_links:
+            pending, self._failed_links = self._failed_links, []
+            logger.info("langfuse_reporter.retrying_failed_links", count=len(pending))
+            for request in pending:
+                if not await self._create_run_item(request):
+                    self._failed_links.append(request)
+            if self._failed_links:
+                logger.error(
+                    "langfuse_reporter.links_permanently_failed",
+                    item_ids=[r.dataset_item_id for r in self._failed_links],
+                )
         try:
             self._client.flush()  # type: ignore[union-attr]
             logger.debug("langfuse_reporter.flushed")
@@ -264,16 +288,68 @@ class LangfuseReporter(TraceReporter):
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _format_query_result(
+        result: QueryResult | None, max_rows: int = 100
+    ) -> dict[str, Any] | None:
+        """Format a QueryResult for Langfuse output, serializing data safely."""
+        if result is None:
+            return None
+
+        formatted_rows: list[list[Any]] = []
+        for row in result.rows[:max_rows]:
+            formatted_row: list[Any] = []
+            for cell in row:
+                if cell is None or isinstance(cell, (int, float, bool, str)):
+                    formatted_row.append(cell)
+                else:
+                    formatted_row.append(str(cell))
+            formatted_rows.append(formatted_row)
+
+        data: dict[str, Any] = {
+            "success": result.success,
+            "columns": result.columns,
+            "rows": formatted_rows,
+            "row_count": result.row_count,
+            "error": result.error,
+        }
+        if result.truncated:
+            data["truncated_by_executor"] = True
+        if len(result.rows) > max_rows:
+            data["truncated"] = True
+            data["total_rows"] = len(result.rows)
+        return data
+
     def _build_sample_output(
         self,
         context: EvaluationContext,
         results: list[EvaluationResult],
     ) -> dict[str, Any]:
-        return {
+        output: dict[str, Any] = {
             "generated_sql": context.generated_sql,
+            "expected_sql": context.expected_sql,
+            "generated_output": self._format_query_result(context.generated_result),
+            "expected_output": self._format_query_result(context.expected_result),
             "succeeded": context.succeeded,
-            "scores": {r.evaluator_name: r.score for r in results},
+            "error": context.error,
+            "scores": {r.evaluator_name: r.score for r in results if r.applicable},
+            "evaluations": {
+                r.evaluator_name: {
+                    "score": r.score,
+                    "passed": r.passed,
+                    "applicable": r.applicable,
+                    "error": r.error,
+                    "details": r.details,
+                }
+                for r in results
+            },
         }
+        if (
+            context.executed_generated_sql
+            and context.executed_generated_sql != context.generated_sql
+        ):
+            output["executed_generated_sql"] = context.executed_generated_sql
+        return output
 
     def _build_sample_metadata(self, context: EvaluationContext) -> dict[str, Any]:
         meta = {
@@ -290,8 +366,10 @@ class LangfuseReporter(TraceReporter):
             ),
         }
         for key in [
-            "time_to_first_row_ms",
             "total_execution_time_ms",
+            "generated_sql_transpiled",
+            "generated_sql_raw_error",
+            "expected_sql_error",
             "token_usage",
             "refiner_iteration_count",
             "model_version",
@@ -304,7 +382,7 @@ class LangfuseReporter(TraceReporter):
                 meta[key] = context.metadata[key]
         return meta
 
-    def _link_to_dataset_run(
+    async def _link_to_dataset_run(
         self,
         dataset_item_id: str,
         trace_id: str,
@@ -312,20 +390,42 @@ class LangfuseReporter(TraceReporter):
         metadata: dict,
         observation_id: str | None = None,
     ) -> None:
-        """Link a sample trace to the Langfuse dataset run."""
-        try:
-            request = CreateDatasetRunItemRequest(
-                runName=run_name,
-                datasetItemId=dataset_item_id,
-                traceId=trace_id,
-                observationId=observation_id,
-                metadata=metadata,
-            )
-            self._client.api.dataset_run_items.create(request=request)  # type: ignore[union-attr]
-        except Exception as exc:
-            logger.warning(
-                "langfuse_reporter.link_failed",
-                item_id=dataset_item_id,
-                error=str(exc),
-            )
+        """Link a sample trace to the Langfuse dataset run, retrying on failure."""
+        request = CreateDatasetRunItemRequest(
+            runName=run_name,
+            datasetItemId=dataset_item_id,
+            traceId=trace_id,
+            observationId=observation_id,
+            metadata=metadata,
+        )
+        if not await self._create_run_item(request):
+            self._failed_links.append(request)
 
+    async def _create_run_item(self, request: CreateDatasetRunItemRequest) -> bool:
+        for attempt in range(1, self._link_max_attempts + 1):
+            try:
+                await asyncio.to_thread(
+                    self._client.api.dataset_run_items.create,  # type: ignore[union-attr]
+                    request=request,
+                )
+                return True
+            except Exception as exc:
+                status_code = getattr(exc, "status_code", None)
+                permanent = (
+                    isinstance(status_code, int)
+                    and 400 <= status_code < 500
+                    and status_code != 429
+                )
+                logger.warning(
+                    "langfuse_reporter.link_failed",
+                    item_id=request.dataset_item_id,
+                    attempt=attempt,
+                    status_code=status_code,
+                    error=str(exc),
+                )
+                if permanent:
+                    # e.g. the item is not in the dataset — retrying won't help
+                    return True
+                if attempt < self._link_max_attempts:
+                    await asyncio.sleep(self._link_retry_base * 2 ** (attempt - 1))
+        return False

@@ -10,13 +10,24 @@ Business logic stays in the use case — this file only handles HTTP concerns:
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 
-from src.api.dependencies.container import get_run_dataset_use_case, get_run_mcp_dataset_use_case
+from src.api.dependencies.container import (
+    get_run_dataset_use_case,
+    get_run_mcp_dataset_use_case,
+)
 from src.application.dto.run_dataset_request import RunDatasetRequest
-from src.application.dto.run_mcp_dataset_request import RunMcpDatasetRequest
 from src.application.dto.run_dataset_response import RunDatasetResponse
+from src.application.dto.run_mcp_dataset_request import RunMcpDatasetRequest
+from src.application.jobs.evaluation_job_store import (
+    EvaluationJob,
+    EvaluationJobStore,
+    get_job_store,
+)
 from src.application.use_cases.run_dataset_evaluation_use_case import (
     RunDatasetEvaluationUseCase,
 )
@@ -90,7 +101,7 @@ async def run_single_dataset(
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Evaluation failed.",
+            detail=f"Evaluation failed: {exc}",
         ) from exc
 
 
@@ -151,3 +162,86 @@ async def run_new_evaluation(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Evaluation failed.",
         ) from exc
+
+
+# ── Background jobs ────────────────────────────────────────────────────────────
+
+
+class EvaluationJobResponse(BaseModel):
+    """Status of a background evaluation job."""
+
+    job_id: str
+    status: str  # running | completed | failed
+    completed_items: int = 0
+    total_items: int | None = None
+    error: str | None = None
+    created_at: datetime
+    finished_at: datetime | None = None
+    result: RunDatasetResponse | None = None
+
+
+def _job_response(job: EvaluationJob) -> EvaluationJobResponse:
+    return EvaluationJobResponse(
+        job_id=job.job_id,
+        status=job.status,
+        completed_items=job.completed_items,
+        total_items=job.total_items,
+        error=job.error,
+        created_at=job.created_at,
+        finished_at=job.finished_at,
+        result=job.result,
+    )
+
+
+@router.post(
+    "/run-new-evaluation/jobs",
+    response_model=EvaluationJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Start a run-new-evaluation in the background",
+    description=(
+        "Same evaluation as POST /run-new-evaluation, but returns a job id "
+        "immediately. Poll GET /jobs/{job_id} until status is completed or "
+        "failed; the completed job carries the full RunDatasetResponse."
+    ),
+)
+async def submit_new_evaluation_job(
+    request: RunMcpDatasetRequest,
+    use_case: RunMcpDatasetEvaluationUseCase = Depends(get_run_mcp_dataset_use_case),
+    job_store: EvaluationJobStore = Depends(get_job_store),
+) -> EvaluationJobResponse:
+    logger.info(
+        "router.submit_new_evaluation_job",
+        dataset_name=request.dataset_name,
+        connection_id=request.connection_id,
+    )
+
+    async def run(progress_callback) -> RunDatasetResponse:
+        return await use_case.execute(request, progress_callback=progress_callback)
+
+    job = job_store.submit(
+        run,
+        metadata={
+            "dataset_name": request.dataset_name,
+            "connection_id": request.connection_id,
+        },
+    )
+    return _job_response(job)
+
+
+@router.get(
+    "/jobs/{job_id}",
+    response_model=EvaluationJobResponse,
+    summary="Get the status (and result) of a background evaluation job",
+    responses={404: {"description": "Unknown job (or the service restarted)"}},
+)
+async def get_evaluation_job(
+    job_id: str,
+    job_store: EvaluationJobStore = Depends(get_job_store),
+) -> EvaluationJobResponse:
+    job = job_store.get(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Evaluation job '{job_id}' not found",
+        )
+    return _job_response(job)

@@ -16,13 +16,13 @@ from src.domain.metrics.base_metric_calculator import BaseMetricCalculator
 class CompositeWeights:
     """Configurable weights for the composite score formula."""
 
-    execution_accuracy: float = 0.60
-    contains_accuracy: float = 0.15
-    sql_exact_match: float = 0.15
-    time_shift: float = 0.10
-    component_match: float = 0.0
-    schema_hallucination: float = 0.0
-    dialect_error: float = 0.0
+    execution_accuracy: float = 0.15
+    contains_accuracy: float = 0.40
+    sql_exact_match: float = 0.0
+    time_shift: float = 0.25
+    component_match: float = 0.10
+    schema_hallucination: float = 0.05
+    dialect_error: float = 0.05
 
     def validate(self) -> None:
         """Raise ValueError if weights do not sum to 1.0."""
@@ -54,13 +54,30 @@ class CompositeScoreCalculator(BaseMetricCalculator[AccuracyStats, float]):
         self._weights.validate()
 
     def calculate(self, samples: AccuracyStats) -> float:
-        score = (
-            self._weights.execution_accuracy * samples.execution_accuracy
-            + self._weights.contains_accuracy * samples.contains_accuracy
-            + self._weights.sql_exact_match * samples.sql_exact_match
-            + self._weights.time_shift * samples.time_shift_score
-            + self._weights.component_match * samples.component_match
-            + self._weights.schema_hallucination * samples.schema_hallucination
-            + self._weights.dialect_error * samples.dialect_error
-        )
+        """
+        Weighted sum of the evaluator averages. When samples.evaluated_counts
+        is known, metrics that judged no sample at all (e.g. time_shift on a
+        dataset without date columns) are left out and the remaining weights
+        are renormalised, instead of counting them as 0.
+        """
+        terms = [
+            ("execution_accuracy", self._weights.execution_accuracy, samples.execution_accuracy),
+            ("contains_accuracy", self._weights.contains_accuracy, samples.contains_accuracy),
+            ("sql_exact_match", self._weights.sql_exact_match, samples.sql_exact_match),
+            ("time_shift", self._weights.time_shift, samples.time_shift_score),
+            ("component_match", self._weights.component_match, samples.component_match),
+            (
+                "schema_hallucination",
+                self._weights.schema_hallucination,
+                samples.schema_hallucination,
+            ),
+            ("dialect_error", self._weights.dialect_error, samples.dialect_error),
+        ]
+        counts = samples.evaluated_counts
+        if counts:
+            terms = [t for t in terms if counts.get(t[0], 0) > 0]
+        total_weight = sum(weight for _, weight, _ in terms)
+        if total_weight <= 0:
+            return 0.0
+        score = sum(weight * value for _, weight, value in terms) / total_weight
         return round(score, 4)

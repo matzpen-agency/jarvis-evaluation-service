@@ -40,7 +40,7 @@ class TrinoQueryExecutor(QueryExecutor):
         self._connection_factory = connection_factory
         self._enabled = enabled
 
-    async def execute(self, sql: str) -> QueryResult:
+    async def execute(self, sql: str, connection_id: int | None = None) -> QueryResult:
         """
         Execute a SQL query asynchronously.
 

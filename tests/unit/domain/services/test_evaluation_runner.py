@@ -148,10 +148,13 @@ async def test_run_with_agent_exception(
         allowed_tables=["orders"],
     )
 
-    # Query execution is skipped entirely because the agent client call threw an exception
-    assert mock_query_executor.execute.call_count == 0
-
     mock_engine.run_all.assert_called_once()
     ctx = mock_engine.run_all.call_args[0][0]
     assert ctx.agent_crashed is True
     assert ctx.error == "Connection refused"
+
+    # Only the golden SQL runs (to tell a broken golden question from an agent
+    # failure); there is no generated SQL to execute
+    assert mock_query_executor.execute.call_count == 1
+    assert mock_query_executor.execute.call_args.args[0] == ctx.expected_sql
+    mock_reporter.report_sample.assert_called_once()

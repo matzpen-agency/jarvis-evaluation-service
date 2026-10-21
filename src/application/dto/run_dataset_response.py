@@ -30,6 +30,7 @@ class AccuracyStatsDTO(BaseModel):
     schema_hallucination: float = 0.0
     dialect_error: float = 0.0
     composite_score: float = 0.0
+    evaluated_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class FailureCategoryDTO(BaseModel):
@@ -77,6 +78,7 @@ class RunDatasetCaseResultDTO(BaseModel):
     succeeded: bool = False
     error: str | None = None
     scores: dict[str, float] = Field(default_factory=dict)
+    not_applicable: list[str] = Field(default_factory=list)
 
 
 class RunDatasetResponse(BaseModel):

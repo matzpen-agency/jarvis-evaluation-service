@@ -9,7 +9,7 @@ Responsibilities:
 
 from __future__ import annotations
 
-import asyncio
+
 import structlog
 
 from src.application.dto.run_dataset_request import RunDatasetRequest
@@ -22,6 +22,7 @@ from src.application.dto.run_dataset_response import (
 )
 from src.domain.entities.dataset_run import DatasetRun
 from src.domain.services.evaluation_runner import EvaluationRunner
+from src.ports.connection_metadata_provider import ConnectionMetadataProvider
 
 logger = structlog.get_logger(__name__)
 
@@ -83,7 +84,10 @@ class RunDatasetEvaluationUseCase:
     @staticmethod
     def _to_response(run: DatasetRun) -> RunDatasetResponse:
         """Map DatasetRun domain entity to RunDatasetResponse DTO."""
-        from src.application.dto.run_dataset_response import PerformanceStatsDTO, RunDatasetCaseResultDTO
+        from src.application.dto.run_dataset_response import (
+            PerformanceStatsDTO,
+            RunDatasetCaseResultDTO,
+        )
         return RunDatasetResponse(
             dataset_name=run.dataset_name,
             run_id=run.run_id,
@@ -111,6 +115,7 @@ class RunDatasetEvaluationUseCase:
                 schema_hallucination=run.accuracy.schema_hallucination,
                 dialect_error=run.accuracy.dialect_error,
                 composite_score=run.accuracy.composite_score,
+                evaluated_counts=run.accuracy.evaluated_counts,
             ),
             failure_analysis=FailureAnalysisDTO(
                 total_failures=run.failure_analysis.total_failures,
@@ -149,71 +154,38 @@ class RunDatasetEvaluationUseCase:
                     succeeded=c.succeeded,
                     error=c.error,
                     scores=c.scores,
+                    not_applicable=c.not_applicable,
                 )
                 for c in run.cases
             ],
         )
 
 
-class BackendTableResolver:
+class BackendTableResolver(ConnectionMetadataProvider):
     """
     Resolves the list of production tables by calling the backend REST API.
 
-    Falls back to an empty list if the backend is unavailable.
+    Falls back to an empty list if the backend is unavailable. Knows table
+    names only (no columns) and ignores connection_id; Jeen metadata is the
+    source of connection schemas.
     """
 
     def __init__(self, backend_url: str, timeout: float = 30.0) -> None:
         self._url = f"{backend_url}/api/agent/tables"
         self._timeout = timeout
-        self._cached_tables: list[dict] | None = None
-        self._lock = asyncio.Lock()
 
-    async def get_all_tables(self) -> list[dict]:
-        async with self._lock:
-            if self._cached_tables is not None:
-                return self._cached_tables
-            import httpx
-            try:
-                async with httpx.AsyncClient(timeout=self._timeout) as client:
-                    response = await client.get(self._url)
-                    response.raise_for_status()
-                    self._cached_tables = response.json()
-                    return self._cached_tables
-            except Exception as exc:
-                logger.warning(
-                    "backend_table_resolver.get_all_tables.failed",
-                    error=str(exc),
-                    fallback="empty_list",
-                )
-                return []
+    async def get_dialect(self, connection_id: int | None) -> str | None:
+        return None
 
-    async def get_table_schema_map(self) -> dict[str, dict[str, str]]:
-        tables = await self.get_all_tables()
-        schema_map: dict[str, dict[str, str]] = {}
-        for t in tables:
-            t_name = t.get("name", "").lower().strip()
-            if not t_name:
-                continue
-            om_json = t.get("openmetadata_json") or {}
-            columns = om_json.get("columns", [])
-            
-            col_map: dict[str, str] = {}
-            for c in columns:
-                c_name = c.get("name", "").lower().strip()
-                if c_name:
-                    db_type = str(c.get("dataTypeDisplay") or c.get("dataType") or "varchar").lower()
-                    col_map[c_name] = db_type
-
-            schema_map[t_name] = col_map
-
-            s_name = t.get("schema_name", "").lower().strip()
-            if s_name:
-                schema_map[f"{s_name}.{t_name}"] = col_map
-
-            cat_name = t.get("catalog", "").lower().strip()
-            if cat_name and s_name:
-                schema_map[f"{cat_name}.{s_name}.{t_name}"] = col_map
-        return schema_map
+    async def get_table_schema_map(
+        self, connection_id: int | None = None
+    ) -> dict[str, dict[str, str]]:
+        """
+        Column metadata isn't available from the backend (connection schemas
+        live in Jeen metadata), so schema-dependent evaluators report
+        "not applicable" on this path.
+        """
+        return {}
 
     async def get_production_tables(self) -> list[str]:
         """

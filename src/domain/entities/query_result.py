@@ -18,6 +18,10 @@ class QueryResult:
     row_count: int = 0
     execution_time_ms: float = 0.0
     error: str | None = None
+    # True when the executor capped the rows (more rows exist than returned).
+    truncated: bool = False
+    # Full row count of a truncated result, when it was counted separately
+    total_row_count: int | None = None
 
     @classmethod
     def failure(cls, error: str, execution_time_ms: float = 0.0) -> QueryResult:
@@ -34,26 +38,14 @@ class QueryResult:
 
     def as_normalised_row_tuples(self, numeric_tolerance: int = 6) -> list[tuple]:
         """
-        Normalise rows for comparison:
-          - Convert numeric strings to rounded floats
-          - Strip leading/trailing whitespace from strings
-          - Convert None to empty string
+        Normalise rows for comparison (see normalize_cell): numbers (including
+        numeric strings, Decimals and formatted money) become rounded floats,
+        timestamps become canonical ISO strings, other strings are trimmed and
+        lower-cased, and NULL stays None (distinct from the empty string).
         """
-        normalised: list[tuple] = []
-        for row in self.rows:
-            norm_row: list[Any] = []
-            for cell in row:
-                if cell is None:
-                    norm_row.append("")
-                elif isinstance(cell, str):
-                    stripped = cell.strip()
-                    try:
-                        norm_row.append(round(float(stripped), numeric_tolerance))
-                    except ValueError:
-                        norm_row.append(stripped.lower())
-                elif isinstance(cell, float | int):
-                    norm_row.append(round(float(cell), numeric_tolerance))
-                else:
-                    norm_row.append(str(cell).strip().lower())
-            normalised.append(tuple(norm_row))
-        return normalised
+        from src.domain.evaluators.sql_comparison_utils import normalize_cell
+
+        return [
+            tuple(normalize_cell(cell, numeric_tolerance) for cell in row)
+            for row in self.rows
+        ]

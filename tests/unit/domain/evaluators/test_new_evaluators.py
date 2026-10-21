@@ -7,14 +7,15 @@ from __future__ import annotations
 import pytest
 
 from src.domain.entities.evaluation_context import EvaluationContext
-from src.domain.entities.query_result import QueryResult
 from src.domain.evaluators.component_match_evaluator import ComponentMatchEvaluator
-from src.domain.evaluators.schema_hallucination_evaluator import SchemaHallucinationEvaluator
 from src.domain.evaluators.dialect_error_evaluator import DialectErrorEvaluator
+from src.domain.evaluators.schema_hallucination_evaluator import (
+    SchemaHallucinationEvaluator,
+)
 
 
 class MockTableResolver:
-    async def get_table_schema_map(self) -> dict[str, set[str]]:
+    async def get_table_schema_map(self, connection_id=None) -> dict[str, set[str]]:
         return {
             "orders": {"order_id", "customer_name", "total_amount"},
             "customers": {"customer_id", "first_name", "last_name", "country"},
@@ -68,7 +69,7 @@ async def test_component_match_partial(comp_evaluator, sample_dataset_item):
     result = await comp_evaluator.evaluate(ctx)
     assert result.score < 1.0
     # SELECT, FROM, JOIN, GROUP, HAVING, ORDER, LIMIT all match (7 out of 8); WHERE mismatches
-    assert result.score == round(7 / 8, 4)
+    assert result.score == round(2 / 3, 4)
     assert result.passed is False
 
 

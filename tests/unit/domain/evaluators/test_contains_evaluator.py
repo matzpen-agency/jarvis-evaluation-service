@@ -1,0 +1,139 @@
+"""
+test_contains_evaluator.py — Unit tests for ContainsEvaluator.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from src.domain.entities.evaluation_context import EvaluationContext
+from src.domain.entities.query_result import QueryResult
+from src.domain.evaluators.contains_evaluator import ContainsEvaluator
+
+
+@pytest.fixture
+def evaluator() -> ContainsEvaluator:
+    return ContainsEvaluator()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ex_contains_perfect_match(evaluator, sample_dataset_item):
+    """When generated has same rows and same columns, score = 1.0."""
+    ctx = EvaluationContext(
+        dataset_item=sample_dataset_item, run_id="r", query="q",
+        expected_sql="SELECT 1", allowed_tables=[]
+    )
+    ctx.expected_result = QueryResult(success=True, rows=[[1], [2]], columns=["v"], row_count=2)
+    ctx.generated_result = QueryResult(success=True, rows=[[1], [2]], columns=["v"], row_count=2)
+
+    result = await evaluator.evaluate(ctx)
+    assert result.score == 1.0
+    assert result.passed is True
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ex_contains_extra_columns_not_allowed(evaluator, sample_dataset_item):
+    """When generated has extra columns but expected data is present, score = 1.0.
+
+    The purpose of column containment is to catch SELECT * returning redundant
+    columns, not to penalise it. As long as every expected column's data appears
+    in the generated result with the exact same rows, the SQL is semantically
+    correct.
+    """
+    ctx = EvaluationContext(
+        dataset_item=sample_dataset_item, run_id="r", query="q",
+        expected_sql="SELECT 1", allowed_tables=[]
+    )
+    ctx.expected_result = QueryResult(success=True, rows=[[1, "a"], [2, "b"]], columns=["id", "name"], row_count=2)
+    ctx.generated_result = QueryResult(success=True, rows=[[99, 1, "a"], [100, 2, "b"]], columns=["extra", "id", "name"], row_count=2)
+
+    result = await evaluator.evaluate(ctx)
+    assert result.score == 1.0
+    assert result.passed is True
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ex_contains_missing_columns_fails(evaluator, sample_dataset_item):
+    """When generated is missing expected columns, score = 0.0."""
+    ctx = EvaluationContext(
+        dataset_item=sample_dataset_item, run_id="r", query="q",
+        expected_sql="SELECT 1", allowed_tables=[]
+    )
+    ctx.expected_result = QueryResult(success=True, rows=[[1, "a"]], columns=["id", "name"], row_count=1)
+    ctx.generated_result = QueryResult(success=True, rows=[[1]], columns=["id"], row_count=1)
+
+    result = await evaluator.evaluate(ctx)
+    assert result.score == 0.0
+    assert result.passed is False
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ex_contains_extra_rows_fails(evaluator, sample_dataset_item):
+    """When generated has extra rows (old superset), strict count check now returns 0.0."""
+    ctx = EvaluationContext(
+        dataset_item=sample_dataset_item, run_id="r", query="q",
+        expected_sql="SELECT 1", allowed_tables=[]
+    )
+    ctx.expected_result = QueryResult(success=True, rows=[[1], [2]], columns=["v"], row_count=2)
+    ctx.generated_result = QueryResult(success=True, rows=[[1], [2], [3]], columns=["v"], row_count=3)
+
+    result = await evaluator.evaluate(ctx)
+    assert result.score == 0.0
+    assert result.passed is False
+    assert result.details["reason"] == "row_count_mismatch"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ex_contains_order_by_enforced(evaluator, sample_dataset_item):
+    """When expected_sql has ORDER BY, scrambled generated rows must return 0.0."""
+    # [3, 1, 2] != [1, 2, 3] in order → fail
+    ctx = EvaluationContext(
+        dataset_item=sample_dataset_item, run_id="r", query="q",
+        expected_sql="SELECT v FROM t ORDER BY v ASC", allowed_tables=[]
+    )
+    ctx.expected_result = QueryResult(success=True, rows=[[1], [2], [3]], columns=["v"], row_count=3)
+    ctx.generated_result = QueryResult(success=True, rows=[[3], [1], [2]], columns=["v"], row_count=3)
+
+    result = await evaluator.evaluate(ctx)
+    assert result.score == 0.0
+    assert result.passed is False
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ex_contains_order_by_fewer_rows_fails(evaluator, sample_dataset_item):
+    """With ORDER BY, row count must also match exactly — fewer generated rows → 0.0."""
+    ctx = EvaluationContext(
+        dataset_item=sample_dataset_item, run_id="r", query="q",
+        expected_sql="SELECT v FROM t ORDER BY v ASC", allowed_tables=[]
+    )
+    ctx.expected_result = QueryResult(success=True, rows=[[1], [2], [3]], columns=["v"], row_count=3)
+    ctx.generated_result = QueryResult(success=True, rows=[[2], [3]], columns=["v"], row_count=2)
+
+    result = await evaluator.evaluate(ctx)
+    assert result.score == 0.0
+    assert result.passed is False
+    assert result.details["reason"] == "row_count_mismatch"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ex_contains_order_by_reverse_subsequence_fails(evaluator, sample_dataset_item):
+    """[3, 2] is NOT an ordered subsequence of [1, 2, 3] → fail."""
+    ctx = EvaluationContext(
+        dataset_item=sample_dataset_item, run_id="r", query="q",
+        expected_sql="SELECT v FROM t ORDER BY v ASC", allowed_tables=[]
+    )
+    ctx.expected_result = QueryResult(success=True, rows=[[1], [2], [3]], columns=["v"], row_count=3)
+    ctx.generated_result = QueryResult(success=True, rows=[[3], [2]], columns=["v"], row_count=2)
+
+    result = await evaluator.evaluate(ctx)
+    assert result.score == 0.0
+    assert result.passed is False
+
+

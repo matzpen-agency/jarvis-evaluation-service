@@ -10,14 +10,20 @@ client's kwargs.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import structlog
 
-from src.application.dto.run_dataset_response import RunDatasetResponse
+from src.application.dto.run_dataset_response import (
+    RunDatasetCaseResultDTO,
+    RunDatasetResponse,
+)
 from src.application.dto.run_mcp_dataset_request import RunMcpDatasetRequest
 from src.application.use_cases.run_dataset_evaluation_use_case import (
     RunDatasetEvaluationUseCase,
 )
 from src.domain.services.evaluation_runner import EvaluationRunner, ProgressCallback
+from src.domain.services.metrics_aggregator import MetricsAggregator
 from src.infrastructure.bird.bird_dataset_loader import (
     BIRD_DATASET_PREFIX,
     bird_db_id_for_connection,
@@ -67,6 +73,7 @@ class RunMcpDatasetEvaluationUseCase:
         self,
         request: RunMcpDatasetRequest,
         progress_callback: ProgressCallback | None = None,
+        case_callback: Callable[[RunDatasetCaseResultDTO], None] | None = None,
     ) -> RunDatasetResponse:
         """
         Run a dataset evaluation against the MCP agent.
@@ -93,6 +100,17 @@ class RunMcpDatasetEvaluationUseCase:
             # Forwarded through EvaluationRunner → agent_client.run(**kwargs)
             agent_kwargs={"connection_id": request.connection_id},
             progress_callback=progress_callback,
+            item_callback=(
+                (
+                    lambda record: case_callback(
+                        RunDatasetEvaluationUseCase.to_case_dto(
+                            MetricsAggregator.case_result(record)
+                        )
+                    )
+                )
+                if case_callback is not None
+                else None
+            ),
         )
 
         return RunDatasetEvaluationUseCase._to_response(dataset_run)

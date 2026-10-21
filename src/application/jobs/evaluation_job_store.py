@@ -37,6 +37,8 @@ class EvaluationJob:
     total_items: int | None = None
     result: Any = None
     error: str | None = None
+    # Results of the questions finished so far (shown while the run is going)
+    completed_cases: list[Any] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
     finished_at: datetime | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -63,9 +65,17 @@ class EvaluationJobStore:
         return self._jobs.get(job_id)
 
     async def _run(self, job: EvaluationJob, runner: JobRunner) -> None:
-        def on_progress(completed: int, total: int) -> None:
-            job.completed_items = completed
-            job.total_items = total
+        class Progress:
+            """Callable progress reporter; .add_case() records a finished question."""
+
+            def __call__(self, completed: int, total: int) -> None:
+                job.completed_items = completed
+                job.total_items = total
+
+            def add_case(self, case: Any) -> None:
+                job.completed_cases.append(case)
+
+        on_progress = Progress()
 
         try:
             job.result = await runner(on_progress)

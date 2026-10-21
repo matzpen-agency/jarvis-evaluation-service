@@ -253,3 +253,17 @@ async def test_run_with_deadline_returns_result_and_abandons_stuck_work():
     assert await run_with_deadline(quick(), 1, label="quick") == 42
     with pytest.raises(TimeoutError, match="stubborn exceeded"):
         await asyncio.wait_for(run_with_deadline(stubborn(), 0.1, label="stubborn"), timeout=2)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_item_callback_reports_each_finished_question(mock_reporter):
+    seen: list[str] = []
+    runner = _runner(_agent(), _executor(), mock_reporter, _items(3))
+    await runner.run(
+        dataset_name="ds",
+        allowed_tables=[],
+        agent_kwargs={"connection_id": 6},
+        item_callback=lambda record: seen.append(record.context.dataset_item.id),
+    )
+    assert seen == ["q0", "q1", "q2"]

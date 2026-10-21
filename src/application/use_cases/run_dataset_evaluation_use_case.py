@@ -9,7 +9,6 @@ Responsibilities:
 
 from __future__ import annotations
 
-
 import structlog
 
 from src.application.dto.run_dataset_request import RunDatasetRequest
@@ -18,6 +17,7 @@ from src.application.dto.run_dataset_response import (
     FailureAnalysisDTO,
     FailureCategoryDTO,
     LatencyStatsDTO,
+    RunDatasetCaseResultDTO,
     RunDatasetResponse,
 )
 from src.domain.entities.dataset_run import DatasetRun
@@ -86,7 +86,6 @@ class RunDatasetEvaluationUseCase:
         """Map DatasetRun domain entity to RunDatasetResponse DTO."""
         from src.application.dto.run_dataset_response import (
             PerformanceStatsDTO,
-            RunDatasetCaseResultDTO,
         )
         return RunDatasetResponse(
             dataset_name=run.dataset_name,
@@ -146,18 +145,21 @@ class RunDatasetEvaluationUseCase:
                 average_token_usage=run.performance.average_token_usage,
                 average_refiner_iterations=run.iteration_stats.average_iterations,
             ),
-            cases=[
-                RunDatasetCaseResultDTO(
-                    question_id=c.question_id,
-                    generated_sql=c.generated_sql,
-                    expected_sql=c.expected_sql,
-                    succeeded=c.succeeded,
-                    error=c.error,
-                    scores=c.scores,
-                    not_applicable=c.not_applicable,
-                )
-                for c in run.cases
-            ],
+            cases=[RunDatasetEvaluationUseCase.to_case_dto(c) for c in run.cases],
+        )
+
+    @staticmethod
+    def to_case_dto(case) -> RunDatasetCaseResultDTO:
+        from src.application.dto.run_dataset_response import RunDatasetCaseResultDTO
+
+        return RunDatasetCaseResultDTO(
+            question_id=case.question_id,
+            generated_sql=case.generated_sql,
+            expected_sql=case.expected_sql,
+            succeeded=case.succeeded,
+            error=case.error,
+            scores=case.scores,
+            not_applicable=case.not_applicable,
         )
 
 

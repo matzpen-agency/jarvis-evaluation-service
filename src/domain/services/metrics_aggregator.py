@@ -137,19 +137,7 @@ class MetricsAggregator:
         )
 
         # ── Cases ─────────────────────────────────────────────────────────────
-        from src.domain.entities.dataset_run import DatasetCaseResult
-        cases = [
-            DatasetCaseResult(
-                question_id=r.context.dataset_item.id,
-                generated_sql=r.context.generated_sql,
-                expected_sql=r.context.expected_sql,
-                succeeded=r.context.succeeded,
-                error=r.context.error or self._expected_sql_error(r.context),
-                scores={res.evaluator_name: res.score for res in r.results if res.applicable},
-                not_applicable=[res.evaluator_name for res in r.results if not res.applicable],
-            )
-            for r in records
-        ]
+        cases = [self.case_result(r) for r in records]
 
         logger.info(
             "metrics_aggregator.done",
@@ -179,6 +167,21 @@ class MetricsAggregator:
             performance=performance_stats,
             langfuse_trace_id=langfuse_trace_id,
             cases=cases,
+        )
+
+    @classmethod
+    def case_result(cls, record: SampleRecord):
+        """Per-question result (also reported live while a run is in progress)."""
+        from src.domain.entities.dataset_run import DatasetCaseResult
+
+        return DatasetCaseResult(
+            question_id=record.context.dataset_item.id,
+            generated_sql=record.context.generated_sql,
+            expected_sql=record.context.expected_sql,
+            succeeded=record.context.succeeded,
+            error=record.context.error or cls._expected_sql_error(record.context),
+            scores={r.evaluator_name: r.score for r in record.results if r.applicable},
+            not_applicable=[r.evaluator_name for r in record.results if not r.applicable],
         )
 
     @staticmethod

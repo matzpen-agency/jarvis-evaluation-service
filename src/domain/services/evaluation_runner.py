@@ -40,6 +40,7 @@ from src.ports.trace_reporter import TraceReporter
 logger = structlog.get_logger(__name__)
 
 ProgressCallback = Callable[[int, int], None]
+ItemCallback = Callable[[SampleRecord], None]
 
 # Upper bound for reporting one sample to Langfuse (link retries included)
 _REPORT_TIMEOUT_SECONDS = 180.0
@@ -90,6 +91,7 @@ class EvaluationRunner:
         offset: int | None = None,
         agent_kwargs: dict | None = None,
         progress_callback: ProgressCallback | None = None,
+        item_callback: ItemCallback | None = None,
     ) -> DatasetRun:
         """
         Execute full evaluation of a named dataset.
@@ -104,6 +106,7 @@ class EvaluationRunner:
             agent_kwargs: Extra agent arguments; connection_id also selects
                 the connection that expected/generated SQL run against.
             progress_callback: Called with (completed, total) after each item.
+            item_callback: Called with each item's SampleRecord once it is done.
 
         Returns:
             Completed DatasetRun with all metrics.
@@ -168,9 +171,14 @@ class EvaluationRunner:
                 schema_map=schema_map,
             )
             completed += 1
-            if progress_callback is not None:
+            for callback, args in (
+                (item_callback, (record,)),
+                (progress_callback, (completed, len(items))),
+            ):
+                if callback is None:
+                    continue
                 try:
-                    progress_callback(completed, len(items))
+                    callback(*args)
                 except Exception as exc:
                     logger.warning("evaluation_runner.progress_callback_failed", error=str(exc))
             return record

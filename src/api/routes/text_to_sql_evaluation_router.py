@@ -21,7 +21,10 @@ from src.api.dependencies.container import (
     get_run_mcp_dataset_use_case,
 )
 from src.application.dto.run_dataset_request import RunDatasetRequest
-from src.application.dto.run_dataset_response import RunDatasetResponse
+from src.application.dto.run_dataset_response import (
+    RunDatasetCaseResultDTO,
+    RunDatasetResponse,
+)
 from src.application.dto.run_mcp_dataset_request import RunMcpDatasetRequest
 from src.application.jobs.evaluation_job_store import (
     EvaluationJob,
@@ -177,6 +180,8 @@ class EvaluationJobResponse(BaseModel):
     error: str | None = None
     created_at: datetime
     finished_at: datetime | None = None
+    # Questions finished so far, with their scores (filled while running)
+    completed_cases: list[RunDatasetCaseResultDTO] = []
     result: RunDatasetResponse | None = None
 
 
@@ -189,6 +194,7 @@ def _job_response(job: EvaluationJob) -> EvaluationJobResponse:
         error=job.error,
         created_at=job.created_at,
         finished_at=job.finished_at,
+        completed_cases=list(job.completed_cases),
         result=job.result,
     )
 
@@ -216,7 +222,11 @@ async def submit_new_evaluation_job(
     )
 
     async def run(progress_callback) -> RunDatasetResponse:
-        return await use_case.execute(request, progress_callback=progress_callback)
+        return await use_case.execute(
+            request,
+            progress_callback=progress_callback,
+            case_callback=getattr(progress_callback, "add_case", None),
+        )
 
     job = job_store.submit(
         run,

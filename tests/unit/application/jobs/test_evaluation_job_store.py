@@ -55,3 +55,25 @@ async def test_job_failure_is_captured():
 @pytest.mark.unit
 def test_unknown_job_is_none():
     assert EvaluationJobStore().get("nope") is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_finished_questions_are_visible_while_running():
+    store = EvaluationJobStore()
+    release = asyncio.Event()
+
+    async def runner(progress):
+        progress.add_case({"question_id": "q1", "scores": {"contains_accuracy": 1.0}})
+        progress(1, 3)
+        await release.wait()
+        return "done"
+
+    job = store.submit(runner)
+    for _ in range(3):
+        await asyncio.sleep(0)
+    running = store.get(job.job_id)
+    assert running.status == "running"
+    assert (running.completed_items, running.total_items) == (1, 3)
+    assert running.completed_cases == [{"question_id": "q1", "scores": {"contains_accuracy": 1.0}}]
+    release.set()

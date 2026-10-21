@@ -10,9 +10,9 @@ import pytest
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.query_result import QueryResult
 from src.domain.evaluators.component_match_evaluator import ComponentMatchEvaluator
-from src.domain.evaluators.dialect_error_evaluator import DialectErrorEvaluator
-from src.domain.evaluators.schema_hallucination_evaluator import (
-    SchemaHallucinationEvaluator,
+from src.domain.evaluators.dialect_validity_evaluator import DialectValidityEvaluator
+from src.domain.evaluators.schema_validity_evaluator import (
+    SchemaValidityEvaluator,
 )
 from src.domain.evaluators.sql_exact_match_evaluator import SqlExactMatchEvaluator
 
@@ -47,7 +47,7 @@ def _ctx(item, generated_sql: str, expected_sql: str = EXPECTED_SQL) -> Evaluati
     return ctx
 
 
-# ── schema_hallucination ──────────────────────────────────────────────────────
+# ── schema_validity ──────────────────────────────────────────────────────
 
 
 @pytest.mark.unit
@@ -68,7 +68,7 @@ def _ctx(item, generated_sql: str, expected_sql: str = EXPECTED_SQL) -> Evaluati
     ],
 )
 async def test_no_false_hallucinations(sample_dataset_item, sql):
-    result = await SchemaHallucinationEvaluator().evaluate(_ctx(sample_dataset_item, sql))
+    result = await SchemaValidityEvaluator().evaluate(_ctx(sample_dataset_item, sql))
     assert result.score == 1.0, result.details
 
 
@@ -79,7 +79,7 @@ async def test_hallucinated_table_and_column_detected(sample_dataset_item):
         "SELECT d.calendar_year, SUM(f.sales_amount) FROM fact_internet_sales f "
         "JOIN dimdate d ON f.orderdatekey = d.datekey GROUP BY 1"
     )
-    result = await SchemaHallucinationEvaluator().evaluate(_ctx(sample_dataset_item, sql))
+    result = await SchemaValidityEvaluator().evaluate(_ctx(sample_dataset_item, sql))
     assert result.score == 0.0
     assert result.details["hallucinated_tables"] == ["fact_internet_sales"]
     assert result.details["hallucinated_columns"] == ["dimdate.calendar_year"]
@@ -89,7 +89,7 @@ async def test_hallucinated_table_and_column_detected(sample_dataset_item):
 @pytest.mark.asyncio
 async def test_wrong_schema_is_a_hallucination(sample_dataset_item):
     sql = "SELECT SUM(salesamount) FROM sales.factinternetsales"
-    result = await SchemaHallucinationEvaluator().evaluate(_ctx(sample_dataset_item, sql))
+    result = await SchemaValidityEvaluator().evaluate(_ctx(sample_dataset_item, sql))
     assert result.details["hallucinated_tables"] == ["sales.factinternetsales"]
 
 
@@ -98,7 +98,7 @@ async def test_wrong_schema_is_a_hallucination(sample_dataset_item):
 async def test_no_schema_is_not_applicable(sample_dataset_item):
     ctx = _ctx(sample_dataset_item, "SELECT 1")
     ctx.schema_map = {}
-    result = await SchemaHallucinationEvaluator().evaluate(ctx)
+    result = await SchemaValidityEvaluator().evaluate(ctx)
     assert result.applicable is False
 
 
@@ -130,13 +130,13 @@ async def test_component_match_partial_credit_and_diff(sample_dataset_item):
     assert result.score == pytest.approx(round((1 + 1 + 0.8) / 3, 4))
 
 
-# ── dialect_error ─────────────────────────────────────────────────────────────
+# ── dialect_validity ─────────────────────────────────────────────────────────────
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("engine_error", "is_dialect_error"),
+    ("engine_error", "is_dialect_validity"),
     [
         ('syntax error at or near "`"', True),
         ("function date_add(unknown, integer, date) does not exist", True),
@@ -145,21 +145,21 @@ async def test_component_match_partial_credit_and_diff(sample_dataset_item):
         ('column "foo" does not exist', False),
     ],
 )
-async def test_dialect_error_classifies_engine_errors(
-    sample_dataset_item, engine_error, is_dialect_error
+async def test_dialect_validity_classifies_engine_errors(
+    sample_dataset_item, engine_error, is_dialect_validity
 ):
     ctx = _ctx(sample_dataset_item, "SELECT foo FROM factinternetsales")
     ctx.generated_result = QueryResult.failure(engine_error)
-    result = await DialectErrorEvaluator().evaluate(ctx)
-    assert result.score == (0.0 if is_dialect_error else 1.0)
+    result = await DialectValidityEvaluator().evaluate(ctx)
+    assert result.score == (0.0 if is_dialect_validity else 1.0)
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_dialect_error_not_applicable_without_sql(sample_dataset_item):
+async def test_dialect_validity_not_applicable_without_sql(sample_dataset_item):
     ctx = _ctx(sample_dataset_item, "")
     ctx.generated_sql = None
-    result = await DialectErrorEvaluator().evaluate(ctx)
+    result = await DialectValidityEvaluator().evaluate(ctx)
     assert result.applicable is False
 
 

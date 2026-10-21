@@ -1,14 +1,15 @@
 """
-dialect_error_evaluator.py — Is the generated SQL valid for its SQL dialect?
+dialect_validity_evaluator.py — Is the generated SQL valid for its SQL dialect?
 
 A dialect error is SQL the database can't even interpret: it doesn't parse
 in the agent's dialect (Trino by default), or the database rejected it with a
 syntax / unknown-function / operator-type error (e.g. MySQL backticks or
 Postgres-only functions sent to Trino). Missing tables or columns are not
-dialect errors — schema_hallucination covers those — and a query that runs
+dialect errors — schema_validity covers those — and a query that runs
 but returns wrong rows is not either.
 
-Score: 1.0 when no dialect problem was found, 0.0 otherwise.
+Score (1 = good): 1.0 when the SQL is valid for its dialect, 0.0 on a dialect
+error (described in details["error"]).
 Not applicable when the agent produced no SQL.
 """
 
@@ -49,18 +50,18 @@ _DIALECT_ERROR_PATTERNS = re.compile(
 )
 
 
-class DialectErrorEvaluator(BaseEvaluator):
+class DialectValidityEvaluator(BaseEvaluator):
     """Validates generated SQL against the agent's dialect and the engine's errors."""
 
     @property
     def name(self) -> str:
-        return "dialect_error"
+        return "dialect_validity"
 
     async def evaluate(self, context: EvaluationContext) -> EvaluationResult:
         try:
             return self._evaluate(context)
         except Exception as exc:
-            logger.error("dialect_error_evaluator.error", error=str(exc))
+            logger.error("dialect_validity_evaluator.error", error=str(exc))
             return EvaluationResult.from_error(self.name, str(exc))
 
     def _evaluate(self, context: EvaluationContext) -> EvaluationResult:

@@ -21,8 +21,8 @@ class CompositeWeights:
     sql_exact_match: float = 0.0
     time_shift: float = 0.25
     component_match: float = 0.10
-    schema_hallucination: float = 0.05
-    dialect_error: float = 0.05
+    schema_validity: float = 0.05
+    dialect_validity: float = 0.05
 
     def validate(self) -> None:
         """Raise ValueError if weights do not sum to 1.0."""
@@ -32,8 +32,8 @@ class CompositeWeights:
             + self.sql_exact_match
             + self.time_shift
             + self.component_match
-            + self.schema_hallucination
-            + self.dialect_error
+            + self.schema_validity
+            + self.dialect_validity
         )
         if abs(total - 1.0) > 0.001:
             raise ValueError(
@@ -67,11 +67,11 @@ class CompositeScoreCalculator(BaseMetricCalculator[AccuracyStats, float]):
             ("time_shift", self._weights.time_shift, samples.time_shift_score),
             ("component_match", self._weights.component_match, samples.component_match),
             (
-                "schema_hallucination",
-                self._weights.schema_hallucination,
-                samples.schema_hallucination,
+                "schema_validity",
+                self._weights.schema_validity,
+                samples.schema_validity,
             ),
-            ("dialect_error", self._weights.dialect_error, samples.dialect_error),
+            ("dialect_validity", self._weights.dialect_validity, samples.dialect_validity),
         ]
         counts = samples.evaluated_counts
         if counts:

@@ -8,9 +8,9 @@ import pytest
 
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.evaluators.component_match_evaluator import ComponentMatchEvaluator
-from src.domain.evaluators.dialect_error_evaluator import DialectErrorEvaluator
-from src.domain.evaluators.schema_hallucination_evaluator import (
-    SchemaHallucinationEvaluator,
+from src.domain.evaluators.dialect_validity_evaluator import DialectValidityEvaluator
+from src.domain.evaluators.schema_validity_evaluator import (
+    SchemaValidityEvaluator,
 )
 
 
@@ -28,13 +28,13 @@ def comp_evaluator() -> ComponentMatchEvaluator:
 
 
 @pytest.fixture
-def schema_evaluator() -> SchemaHallucinationEvaluator:
-    return SchemaHallucinationEvaluator(table_resolver=MockTableResolver())
+def schema_evaluator() -> SchemaValidityEvaluator:
+    return SchemaValidityEvaluator(table_resolver=MockTableResolver())
 
 
 @pytest.fixture
-def dialect_evaluator() -> DialectErrorEvaluator:
-    return DialectErrorEvaluator()
+def dialect_evaluator() -> DialectValidityEvaluator:
+    return DialectValidityEvaluator()
 
 
 @pytest.mark.unit
@@ -75,7 +75,7 @@ async def test_component_match_partial(comp_evaluator, sample_dataset_item):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_schema_hallucination_none(schema_evaluator, sample_dataset_item):
+async def test_schema_validity_none(schema_evaluator, sample_dataset_item):
     ctx = EvaluationContext(
         dataset_item=sample_dataset_item,
         run_id="r",
@@ -94,7 +94,7 @@ async def test_schema_hallucination_none(schema_evaluator, sample_dataset_item):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_schema_hallucination_detected(schema_evaluator, sample_dataset_item):
+async def test_schema_validity_detected(schema_evaluator, sample_dataset_item):
     ctx = EvaluationContext(
         dataset_item=sample_dataset_item,
         run_id="r",
@@ -113,7 +113,7 @@ async def test_schema_hallucination_detected(schema_evaluator, sample_dataset_it
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_dialect_error_none(dialect_evaluator, sample_dataset_item):
+async def test_dialect_validity_none(dialect_evaluator, sample_dataset_item):
     ctx = EvaluationContext(
         dataset_item=sample_dataset_item,
         run_id="r",
@@ -130,7 +130,7 @@ async def test_dialect_error_none(dialect_evaluator, sample_dataset_item):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_dialect_error_detected(dialect_evaluator, sample_dataset_item):
+async def test_dialect_validity_detected(dialect_evaluator, sample_dataset_item):
     ctx = EvaluationContext(
         dataset_item=sample_dataset_item,
         run_id="r",

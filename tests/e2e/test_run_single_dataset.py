@@ -61,8 +61,8 @@ def test_run_single_dataset_success(client):
             sql_exact_match=0.6,
             time_shift_score=0.7,
             component_match=0.0,
-            schema_hallucination=0.0,
-            dialect_error=0.0,
+            schema_validity=0.0,
+            dialect_validity=0.0,
             composite_score=0.75,
         ),
         failure_analysis=FailureAnalysisDTO(

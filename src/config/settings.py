@@ -93,8 +93,8 @@ class Settings(BaseSettings):
     COMPOSITE_WEIGHT_SQL_EXACT_MATCH: float = 0.0
     COMPOSITE_WEIGHT_TIME_SHIFT: float = 0.25
     COMPOSITE_WEIGHT_COMPONENT_MATCH: float = 0.10
-    COMPOSITE_WEIGHT_SCHEMA_HALLUCINATION: float = 0.05
-    COMPOSITE_WEIGHT_DIALECT_ERROR: float = 0.05
+    COMPOSITE_WEIGHT_SCHEMA_VALIDITY: float = 0.05
+    COMPOSITE_WEIGHT_DIALECT_VALIDITY: float = 0.05
 
     # ── BIRD benchmark (dataset "bird", run on a connection named after a BIRD db_id)
     # Bundled with the service (no internet access needed); relative paths are

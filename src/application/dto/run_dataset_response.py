@@ -27,8 +27,8 @@ class AccuracyStatsDTO(BaseModel):
     sql_exact_match: float = 0.0
     time_shift_score: float = 0.0
     component_match: float = 0.0
-    schema_hallucination: float = 0.0
-    dialect_error: float = 0.0
+    schema_validity: float = 0.0
+    dialect_validity: float = 0.0
     composite_score: float = 0.0
     evaluated_counts: dict[str, int] = Field(default_factory=dict)
 

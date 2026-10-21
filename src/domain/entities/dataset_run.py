@@ -30,8 +30,8 @@ class AccuracyStats:
     sql_exact_match: float = 0.0
     time_shift_score: float = 0.0
     component_match: float = 0.0
-    schema_hallucination: float = 0.0
-    dialect_error: float = 0.0
+    schema_validity: float = 0.0
+    dialect_validity: float = 0.0
     composite_score: float = 0.0
     # evaluator name → number of samples it could judge (not-applicable excluded)
     evaluated_counts: dict[str, int] = field(default_factory=dict)

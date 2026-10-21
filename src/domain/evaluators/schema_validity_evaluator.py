@@ -1,13 +1,14 @@
 """
-schema_hallucination_evaluator.py — Detects tables/columns in the generated SQL
-that don't exist in the connection's schema.
+schema_validity_evaluator.py — Does the generated SQL only reference tables
+and columns that exist in the connection's schema? (No schema hallucination.)
 
 The schema comes from the connection metadata (context.schema_map, falling
 back to the table resolver). References are resolved per query scope with
 sqlglot, so table aliases, CTE names, subquery columns and SELECT aliases
 used in ORDER BY are not mistaken for hallucinations.
 
-Score: 1.0 when every referenced table and column exists, 0.0 otherwise.
+Score (1 = good): 1.0 when every referenced table and column exists, 0.0 when
+anything is hallucinated (listed in details).
 Not applicable when no schema metadata is available or there is no SQL.
 """
 
@@ -29,7 +30,7 @@ logger = structlog.get_logger(__name__)
 _DERIVED = object()  # a source whose columns we can't check (CTE, subquery, UNNEST)
 
 
-class SchemaHallucinationEvaluator(BaseEvaluator):
+class SchemaValidityEvaluator(BaseEvaluator):
     """Flags generated SQL that references non-existent tables or columns."""
 
     def __init__(self, table_resolver: Any = None) -> None:
@@ -37,13 +38,13 @@ class SchemaHallucinationEvaluator(BaseEvaluator):
 
     @property
     def name(self) -> str:
-        return "schema_hallucination"
+        return "schema_validity"
 
     async def evaluate(self, context: EvaluationContext) -> EvaluationResult:
         try:
             return await self._evaluate(context)
         except Exception as exc:
-            logger.error("schema_hallucination_evaluator.error", error=str(exc))
+            logger.error("schema_validity_evaluator.error", error=str(exc))
             return EvaluationResult.from_error(self.name, str(exc))
 
     async def _evaluate(self, context: EvaluationContext) -> EvaluationResult:
@@ -130,7 +131,7 @@ class SchemaHallucinationEvaluator(BaseEvaluator):
         try:
             return await self._resolver.get_table_schema_map(context.connection_id)
         except Exception as exc:
-            logger.warning("schema_hallucination.resolver_failed", error=str(exc))
+            logger.warning("schema_validity.resolver_failed", error=str(exc))
             return {}
 
     @staticmethod

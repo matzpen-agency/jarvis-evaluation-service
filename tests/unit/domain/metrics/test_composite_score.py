@@ -22,8 +22,8 @@ def test_perfect_scores():
         sql_exact_match=1.0,
         time_shift_score=1.0,
         component_match=1.0,
-        schema_hallucination=1.0,
-        dialect_error=1.0,
+        schema_validity=1.0,
+        dialect_validity=1.0,
     )
     assert calc.calculate(stats) == 1.0
 
@@ -43,8 +43,8 @@ def test_weighted_computation():
         sql_exact_match=0.2,
         time_shift=0.1,
         component_match=0.0,
-        schema_hallucination=0.0,
-        dialect_error=0.0,
+        schema_validity=0.0,
+        dialect_validity=0.0,
     )
     calc = CompositeScoreCalculator(weights)
     stats = AccuracyStats(
@@ -65,8 +65,8 @@ def test_invalid_weights_raises():
             sql_exact_match=0.0,
             time_shift=0.0,
             component_match=0.0,
-            schema_hallucination=0.0,
-            dialect_error=0.0,
+            schema_validity=0.0,
+            dialect_validity=0.0,
         )
         weights.validate()
 
@@ -80,8 +80,8 @@ def test_contains_is_the_dominant_default_weight():
         weights.sql_exact_match,
         weights.time_shift,
         weights.component_match,
-        weights.schema_hallucination,
-        weights.dialect_error,
+        weights.schema_validity,
+        weights.dialect_validity,
     ]
     assert weights.contains_accuracy > max(others)
 
@@ -96,16 +96,16 @@ def test_metrics_without_applicable_samples_are_renormalised_away():
         sql_exact_match=1.0,
         time_shift_score=0.0,
         component_match=1.0,
-        schema_hallucination=1.0,
-        dialect_error=1.0,
+        schema_validity=1.0,
+        dialect_validity=1.0,
         evaluated_counts={
             "execution_accuracy": 3,
             "contains_accuracy": 3,
             "sql_exact_match": 3,
             "time_shift": 0,
             "component_match": 3,
-            "schema_hallucination": 3,
-            "dialect_error": 3,
+            "schema_validity": 3,
+            "dialect_validity": 3,
         },
     )
     assert calc.calculate(stats) == 1.0

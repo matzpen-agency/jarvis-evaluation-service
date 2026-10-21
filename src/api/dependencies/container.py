@@ -28,12 +28,12 @@ from src.application.use_cases.run_mcp_dataset_evaluation_use_case import (
 from src.config.settings import Settings
 from src.domain.evaluators.component_match_evaluator import ComponentMatchEvaluator
 from src.domain.evaluators.contains_evaluator import ContainsEvaluator
-from src.domain.evaluators.dialect_error_evaluator import DialectErrorEvaluator
+from src.domain.evaluators.dialect_validity_evaluator import DialectValidityEvaluator
 from src.domain.evaluators.execution_accuracy_evaluator import (
     ExecutionAccuracyEvaluator,
 )
-from src.domain.evaluators.schema_hallucination_evaluator import (
-    SchemaHallucinationEvaluator,
+from src.domain.evaluators.schema_validity_evaluator import (
+    SchemaValidityEvaluator,
 )
 from src.domain.evaluators.sql_exact_match_evaluator import SqlExactMatchEvaluator
 from src.domain.evaluators.time_shift_evaluator import TimeShiftEvaluator
@@ -213,8 +213,8 @@ def get_evaluation_engine(
             shift_timeout_seconds=settings.TIME_SHIFT_TIMEOUT,
         ),
         ComponentMatchEvaluator(),
-        SchemaHallucinationEvaluator(table_resolver=table_resolver),
-        DialectErrorEvaluator(),
+        SchemaValidityEvaluator(table_resolver=table_resolver),
+        DialectValidityEvaluator(),
     ]
     return EvaluationEngine(evaluators)
 
@@ -229,8 +229,8 @@ def get_metrics_aggregator(
         sql_exact_match=settings.COMPOSITE_WEIGHT_SQL_EXACT_MATCH,
         time_shift=settings.COMPOSITE_WEIGHT_TIME_SHIFT,
         component_match=settings.COMPOSITE_WEIGHT_COMPONENT_MATCH,
-        schema_hallucination=settings.COMPOSITE_WEIGHT_SCHEMA_HALLUCINATION,
-        dialect_error=settings.COMPOSITE_WEIGHT_DIALECT_ERROR,
+        schema_validity=settings.COMPOSITE_WEIGHT_SCHEMA_VALIDITY,
+        dialect_validity=settings.COMPOSITE_WEIGHT_DIALECT_VALIDITY,
     )
     return MetricsAggregator(weights=weights)
 

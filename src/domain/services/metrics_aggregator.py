@@ -212,8 +212,8 @@ class MetricsAggregator:
             sql_exact_match=_avg("sql_exact_match"),
             time_shift_score=_avg("time_shift"),
             component_match=_avg("component_match"),
-            schema_hallucination=_avg("schema_hallucination"),
-            dialect_error=_avg("dialect_error"),
+            schema_validity=_avg("schema_validity"),
+            dialect_validity=_avg("dialect_validity"),
             composite_score=0.0,  # filled in by caller
         )
         stats.evaluated_counts = counts

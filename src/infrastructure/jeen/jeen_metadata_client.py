@@ -44,6 +44,8 @@ _SQLGLOT_DIALECTS: dict[str, str] = {
 }
 
 _TRANSIENT_ERRORS = (httpx.TransportError, McpProtocolError)
+# Jeen rate-limits run_query; keep trying (with longer waits) before giving up
+_RATE_LIMIT_ATTEMPTS = 6
 
 
 class JeenMetadataClient:
@@ -178,30 +180,56 @@ class JeenMetadataClient:
             return value
 
     async def _call(self, tool: str, arguments: dict[str, Any]):
-        """Call a tool, retrying transport-level failures with backoff."""
+        """
+        Call a tool, retrying transport failures and 5xx with short backoff,
+        and rate limiting (429) with longer waits honoring Retry-After.
+        """
         last_exc: Exception | None = None
-        for attempt in range(1, self._max_retries + 1):
+        rate_limited = False
+        attempt = 0
+        while True:
+            attempt += 1
             try:
                 async with self._semaphore:
                     return await self._mcp.call_tool(tool, arguments)
             except httpx.HTTPStatusError as exc:
                 last_exc = exc
-                if exc.response.status_code < 500 and exc.response.status_code != 429:
+                status = exc.response.status_code
+                if status < 500 and status != 429:
                     raise
+                rate_limited = status == 429
             except _TRANSIENT_ERRORS as exc:
                 last_exc = exc
-            if attempt < self._max_retries:
+                rate_limited = False
+
+            max_attempts = _RATE_LIMIT_ATTEMPTS if rate_limited else self._max_retries
+            if attempt >= max_attempts:
+                break
+            if rate_limited:
+                wait = _retry_after_seconds(last_exc) or min(30.0, 5.0 * attempt)
+            else:
                 wait = 1.5 * attempt
-                logger.warning(
-                    "jeen_metadata.retry",
-                    tool=tool,
-                    attempt=attempt,
-                    error=str(last_exc),
-                    next_retry_in_s=wait,
-                )
-                await asyncio.sleep(wait)
+            logger.warning(
+                "jeen_metadata.retry",
+                tool=tool,
+                attempt=attempt,
+                rate_limited=rate_limited,
+                error=str(last_exc),
+                next_retry_in_s=wait,
+            )
+            await asyncio.sleep(wait)
         assert last_exc is not None
         raise last_exc
+
+
+def _retry_after_seconds(exc: Exception | None) -> float | None:
+    """Seconds from a 429's Retry-After header (capped at 60), if present."""
+    response = getattr(exc, "response", None)
+    value = response.headers.get("retry-after") if response is not None else None
+    try:
+        return min(60.0, max(0.0, float(value))) if value else None
+    except ValueError:
+        return None
 
 
 class JeenConnectionMetadataProvider(ConnectionMetadataProvider):

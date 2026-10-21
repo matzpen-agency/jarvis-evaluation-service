@@ -119,3 +119,40 @@ def test_sse_parsing_skips_notifications():
     )
     messages = McpHttpClient.parse_sse_messages(body)
     assert [m.get("id") for m in messages] == [None, "req-1"]
+
+
+def _rate_limited(retry_after: str | None = None) -> httpx.HTTPStatusError:
+    headers = {"retry-after": retry_after} if retry_after else {}
+    request = httpx.Request("POST", "http://jeen/api/mcp")
+    response = httpx.Response(429, headers=headers, request=request)
+    return httpx.HTTPStatusError("429 Too Many Requests", request=request, response=response)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_rate_limit_waits_retry_after_and_keeps_trying(client, monkeypatch):
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+    client._mcp.call_tool = AsyncMock(
+        side_effect=[_rate_limited("7"), _rate_limited(), _rate_limited(), _rate_limited(),
+                     _ok({"columns": ["a"], "rows": [{"a": 1}]})]
+    )
+    result = await client.run_query(6, "SELECT 1")
+
+    assert result.success is True  # more attempts than the 3 used for network errors
+    assert sleeps == [7.0, 10.0, 15.0, 20.0]  # Retry-After, then growing backoff
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_persistent_rate_limit_eventually_fails(client, monkeypatch):
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client._mcp.call_tool = AsyncMock(side_effect=_rate_limited())
+    result = await client.run_query(6, "SELECT 1")
+    assert result.success is False
+    assert "429" in result.error
+    assert client._mcp.call_tool.await_count == 6

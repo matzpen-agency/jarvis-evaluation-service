@@ -724,13 +724,6 @@ def grading_for(context: Any) -> Grading:
     return parse_grading_method(metadata.get("grading_method"))
 
 
-def _has_outer_limit(sql: str | None, dialect: str | None = None) -> bool:
-    parsed = safe_parse(sql, dialect)
-    return parsed is not None and (
-        node_arg(parsed, "limit") is not None or parsed.args.get("fetch") is not None
-    )
-
-
 async def compare_with_order_policy(
     context: Any,
     expected_result: Any,
@@ -746,12 +739,13 @@ async def compare_with_order_policy(
 
       - explicit per-question grading (e.g. BIRD "list"/"set") is followed as is
       - no outer ORDER BY in the golden SQL → order ignored
-      - ORDER BY with LIMIT → order ignored; the ordering already decides
-        WHICH rows come back, so a wrong order shows up as wrong rows
-      - ORDER BY without LIMIT → rows compared first; if they match but come
-        back in another order, the order judge decides from the question
-        whether order was asked for (decision + reason in details). When no
-        decision is possible the result passes, flagged "order not verified".
+      - outer ORDER BY (with or without LIMIT) → rows compared first; if they
+        match but come back in another order, the order judge decides from
+        the question whether order was asked for (decision + reason in
+        details). With LIMIT a wrong sort usually already shows up as wrong
+        rows; the judge catches the right top k listed in the wrong order.
+        When no decision is possible the result passes, flagged "order not
+        verified".
     """
     expected_sql = expected_sql or context.expected_sql
     grading = grading_for(context)
@@ -780,9 +774,6 @@ async def compare_with_order_policy(
         numeric_tolerance=numeric_tolerance,
     )
     if not _requires_order_by(expected_sql, context.dialect):
-        return score, details
-    if _has_outer_limit(expected_sql, context.dialect):
-        details["order_policy"] = "ignored: ORDER BY with LIMIT (rows decide)"
         return score, details
     if score < 1.0 or details.get("inconclusive") or details.get("empty_result"):
         return score, details

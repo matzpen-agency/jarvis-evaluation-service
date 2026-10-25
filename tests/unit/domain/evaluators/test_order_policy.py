@@ -1,8 +1,8 @@
 """
 test_order_policy.py — When does row order count?
 
-Order only matters when the golden SQL has ORDER BY without LIMIT, the rows
-match, the order differs — and the question asks for an order.
+Order only matters when the golden SQL has ORDER BY (with or without LIMIT),
+the rows match, the order differs — and the question asks for an order.
 """
 
 from __future__ import annotations
@@ -54,13 +54,46 @@ async def test_no_order_by_ignores_order_without_asking():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_order_by_with_limit_lets_the_rows_decide():
+async def test_top_k_in_the_wrong_order_fails():
+    """The right top 3, listed in the wrong order, for a top-k question."""
+    judge = FakeJudge(True, "A top-3 question asks for a ranked list.")
+    ctx = _ctx("SELECT v FROM t ORDER BY v LIMIT 3", SCRAMBLED, question="Top 3 values?")
+    result = await ContainsEvaluator(order_judge=judge).evaluate(ctx)
+    assert result.score == 0.0
+    assert result.details["reason"] == "row_order_mismatch"
+    assert judge.questions == ["Top 3 values?"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_top_k_in_the_right_order_never_asks_the_judge():
     judge = FakeJudge(True)
+    ctx = _ctx("SELECT v FROM t ORDER BY v LIMIT 3", [[1], [2], [3]])
+    result = await ContainsEvaluator(order_judge=judge).evaluate(ctx)
+    assert result.score == 1.0
+    assert result.details["order_policy"] == "order matches"
+    assert judge.questions == []
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_wrong_top_k_rows_fail_without_asking_the_judge():
+    """A wrong sort gives a different top k: the rows already fail."""
+    judge = FakeJudge(False)
+    ctx = _ctx("SELECT v FROM t ORDER BY v LIMIT 3", [[1], [2], [4]])
+    result = await ContainsEvaluator(order_judge=judge).evaluate(ctx)
+    assert result.score == 0.0
+    assert judge.questions == []
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_limit_without_an_order_request_passes():
+    judge = FakeJudge(False, "Asks which values, not a ranking.")
     ctx = _ctx("SELECT v FROM t ORDER BY v LIMIT 3", SCRAMBLED)
     result = await ContainsEvaluator(order_judge=judge).evaluate(ctx)
     assert result.score == 1.0
-    assert "LIMIT" in result.details["order_policy"]
-    assert judge.questions == []
+    assert result.details["order_judgment"]["requires_order"] is False
 
 
 @pytest.mark.unit

@@ -141,3 +141,11 @@ async def test_decisions_are_saved_and_reused_across_runs(tmp_path):
     assert (decision.requires_order, decision.source) == (True, "cache")
     saved = json.loads(cache.read_text(encoding="utf-8"))
     assert next(iter(saved.values()))["reason"] == "chronological"
+
+
+@pytest.mark.unit
+def test_prompt_treats_top_k_as_an_order_request():
+    from src.infrastructure.llm.llm_order_judge import SYSTEM_PROMPT
+
+    assert "Top-k and ranking questions ALSO ask for order" in SYSTEM_PROMPT
+    assert "top 10 products by revenue" in SYSTEM_PROMPT

@@ -6,8 +6,9 @@ OpenAI itself, or a private-network AI service serving e.g.
 Qwen/Qwen3.6-27B-FP8, Qwen/Qwen3.8-27B-FP8 or openai/gpt-oss-120b.
 
 Each question is judged once: decisions are cached in memory and in a JSON
-file keyed by the question text, so every run treats a question the same way
-and a question is only re-judged when its text changes.
+file keyed by the question text, model and prompt, so every run treats a
+question the same way and a question is only re-judged when one of them
+changes.
 """
 
 from __future__ import annotations
@@ -32,8 +33,14 @@ Decide whether the question asks for the result rows in a specific ORDER.
 
 Order IS requested when the wording asks to sort or rank the rows: "sorted by",
 "ordered by", "from highest to lowest", "in descending order", "chronologically",
-"alphabetically", "rank", "top 10 ... in order", "list ... by date", or the Hebrew
-equivalents (ממוין, לפי סדר, מהגבוה לנמוך, מהנמוך לגבוה, בסדר יורד/עולה, דרג).
+"alphabetically", "rank", "list ... by date", or the Hebrew equivalents (ממוין,
+לפי סדר, מהגבוה לנמוך, מהנמוך לגבוה, בסדר יורד/עולה, דרג).
+
+Top-k and ranking questions ALSO ask for order, even without the word "order":
+"top 5 ...", "the 10 highest/largest/best-selling ...", "the 3 most ...",
+"the lowest 5 ...", "first/last N ...", "which are the leading ..." — a top-k
+answer is read as a ranked list, best first. Hebrew: "5 המובילים", "10 הגבוהים
+ביותר", "3 הנמכרים ביותר", "הכי ... (N הראשונים)".
 
 Order is NOT requested when the question only asks which rows, how many, a
 total, an average, or a breakdown per group ("revenue by territory", "sales per
@@ -53,7 +60,13 @@ A: {"requires_order": true, "reason": "Asks to show products from highest to low
 Q: כמה לקוחות יש בכל מדינה?
 A: {"requires_order": false, "reason": "Asks for a count per country only."}
 Q: Show monthly sales for 2013 in chronological order.
-A: {"requires_order": true, "reason": "Asks for chronological order."}"""
+A: {"requires_order": true, "reason": "Asks for chronological order."}
+Q: What are the top 10 products by revenue?
+A: {"requires_order": true, "reason": "A top-10 question asks for a ranked list."}
+Q: מי 5 הלקוחות שקנו הכי הרבה?
+A: {"requires_order": true, "reason": "Asks for the top 5 customers, a ranking."}
+Q: Which customers bought more than $10,000 in 2013?
+A: {"requires_order": false, "reason": "A threshold filter, not a ranking."}"""
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -103,7 +116,9 @@ class LlmOrderJudge(OrderJudge):
         self._lock = asyncio.Lock()
 
     async def requires_order(self, question: str) -> OrderDecision:
-        key = hashlib.sha256(question.strip().encode("utf-8")).hexdigest()
+        key = hashlib.sha256(
+            "\0".join((self._model, SYSTEM_PROMPT, question.strip())).encode("utf-8")
+        ).hexdigest()
         async with self._lock:
             cached = self._load_cache().get(key)
             if cached is not None:

@@ -36,9 +36,12 @@ class TrinoQueryExecutor(QueryExecutor):
         self,
         connection_factory: Callable[[], Any],
         enabled: bool = True,
+        max_rows: int | None = None,
     ) -> None:
         self._connection_factory = connection_factory
         self._enabled = enabled
+        # Cap like the Jeen executor, so both sides of a comparison are cut alike
+        self._max_rows = max_rows
 
     async def execute(self, sql: str, connection_id: int | None = None) -> QueryResult:
         """
@@ -73,7 +76,13 @@ class TrinoQueryExecutor(QueryExecutor):
             conn = self._connection_factory()
             cur = conn.cursor()
             cur.execute(sql)
-            rows = cur.fetchall()
+            truncated = False
+            if self._max_rows:
+                rows = cur.fetchmany(self._max_rows + 1)
+                truncated = len(rows) > self._max_rows
+                rows = rows[: self._max_rows]
+            else:
+                rows = cur.fetchall()
             columns = [desc[0] for desc in cur.description] if cur.description else []
             elapsed_ms = (time.monotonic() - start) * 1000
 
@@ -88,6 +97,7 @@ class TrinoQueryExecutor(QueryExecutor):
                 columns=columns,
                 row_count=len(rows),
                 execution_time_ms=round(elapsed_ms, 2),
+                truncated=truncated,
             )
 
         except Exception as exc:

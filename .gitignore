@@ -221,3 +221,4 @@ skills/
 
 # Saved order-judge decisions (runtime data)
 /data/
+/certs/

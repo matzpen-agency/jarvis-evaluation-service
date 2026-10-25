@@ -48,6 +48,9 @@ class EvaluationContext:
     # The form of generated_sql that was actually executed (it differs when the
     # agent's SQL had to be transpiled to the connection's dialect)
     executed_generated_sql: str | None = None
+    # True when generated SQL runs on the agent's own engine (see
+    # AgentSqlExecutor) instead of the connection: it stays in agent_dialect
+    generated_on_agent_engine: bool = False
 
     # ── Execution results ─────────────────────────────────────────────────────
     expected_result: QueryResult | None = None

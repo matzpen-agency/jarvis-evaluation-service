@@ -14,6 +14,8 @@ services:
     volumes:
       # Saved order-judge decisions survive rebuilds
       - ./data:/app/data
+      # Client certificates for the agent's Trino (AGENT_TRINO_CERT_PATH)
+      - ${AGENT_TRINO_CERTS_DIR:-./certs}:/app/certs:ro
     restart: unless-stopped
     networks:
       - default

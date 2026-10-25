@@ -60,10 +60,14 @@ from src.infrastructure.text_to_sql_agent.mcp_agent_client import McpAgentClient
 from src.infrastructure.text_to_sql_agent.text_to_sql_agent_client import (
     TextToSqlAgentClient,
 )
+from src.infrastructure.trino.agent_trino_query_executor import (
+    AgentTrinoQueryExecutor,
+    parse_catalog_map,
+)
 from src.infrastructure.trino.trino_query_executor import TrinoQueryExecutor
 from src.ports.connection_metadata_provider import ConnectionMetadataProvider
 from src.ports.order_judge import OrderJudge
-from src.ports.query_executor import QueryExecutor
+from src.ports.query_executor import AgentSqlExecutor, QueryExecutor
 
 
 @lru_cache
@@ -116,6 +120,49 @@ def _get_order_judge() -> OrderJudge | None:
         model=settings.LLM_MODEL,
         timeout=settings.LLM_TIMEOUT,
         cache_path=_project_path(settings.ORDER_JUDGE_CACHE_PATH),
+    )
+
+
+def _verify_value(value: bool | str) -> bool | str:
+    if isinstance(value, str):
+        if value.lower() in ("false", "0", "no", "off"):
+            return False
+        if value.lower() in ("true", "1", "yes", "on"):
+            return True
+    return value
+
+
+@lru_cache
+def _get_agent_executor() -> AgentSqlExecutor | None:
+    """Executor for generated SQL on the agent's own Trino, or None when no
+    connection is mapped to an agent Trino catalog."""
+    settings = get_settings()
+    catalogs = parse_catalog_map(settings.AGENT_TRINO_CATALOGS)
+    if not catalogs or not settings.AGENT_TRINO_HOST:
+        return None
+
+    def _connection_factory(catalog: str):
+        auth = None
+        if settings.AGENT_TRINO_CERT_PATH and settings.AGENT_TRINO_KEY_PATH:
+            auth = trino.auth.CertificateAuthentication(
+                settings.AGENT_TRINO_CERT_PATH, settings.AGENT_TRINO_KEY_PATH
+            )
+        return trino.dbapi.connect(
+            host=settings.AGENT_TRINO_HOST,
+            port=settings.AGENT_TRINO_PORT,
+            user=settings.AGENT_TRINO_USER,
+            catalog=catalog,
+            schema=settings.AGENT_TRINO_SCHEMA,
+            http_scheme=settings.AGENT_TRINO_HTTP_SCHEME,
+            request_timeout=settings.AGENT_TRINO_REQUEST_TIMEOUT,
+            verify=_verify_value(settings.AGENT_TRINO_VERIFY),
+            auth=auth,
+        )
+
+    return AgentTrinoQueryExecutor(
+        connection_factory=_connection_factory,
+        catalogs=catalogs,
+        max_rows=settings.AGENT_TRINO_MAX_ROWS,
     )
 
 
@@ -239,6 +286,7 @@ def get_evaluation_engine(
             table_resolver=table_resolver,
             shift_timeout_seconds=settings.TIME_SHIFT_TIMEOUT,
             order_judge=_get_order_judge(),
+            agent_executor=_get_agent_executor(),
         ),
         ComponentMatchEvaluator(),
         SchemaValidityEvaluator(table_resolver=table_resolver),
@@ -301,6 +349,7 @@ def get_run_dataset_use_case(
         metadata_provider=metadata_provider,
         agent_dialect=settings.AGENT_SQL_DIALECT,
         numeric_tolerance=settings.NUMERIC_COMPARISON_TOLERANCE,
+        agent_executor=_get_agent_executor(),
     )
 
     return RunDatasetEvaluationUseCase(
@@ -343,6 +392,7 @@ def get_run_mcp_dataset_use_case(
         metadata_provider=metadata_provider,
         agent_dialect=settings.AGENT_SQL_DIALECT,
         numeric_tolerance=settings.NUMERIC_COMPARISON_TOLERANCE,
+        agent_executor=_get_agent_executor(),
     )
 
     return RunMcpDatasetEvaluationUseCase(runner=runner, metadata_provider=metadata_provider)

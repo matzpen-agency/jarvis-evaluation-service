@@ -42,6 +42,25 @@ class Settings(BaseSettings):
     TRINO_CERT_PATH: str | None = None
     TRINO_KEY_PATH: str | None = None
 
+    # ── Agent's Trino: where the agent's generated SQL is executed ──────────
+    # The agent writes and tests its SQL on its own Trino, where column types
+    # can differ from the connection's database (Postgres money → varchar).
+    # Connections listed here run the generated SQL on that Trino, in the
+    # given catalog ("6=adventureworks,7=sales"); the golden SQL and all other
+    # connections still run on the connection through Jeen.
+    AGENT_TRINO_CATALOGS: str = ""
+    AGENT_TRINO_HOST: str | None = None
+    AGENT_TRINO_PORT: int = 443
+    AGENT_TRINO_USER: str = "trino"
+    AGENT_TRINO_SCHEMA: str = "public"
+    AGENT_TRINO_HTTP_SCHEME: str = "https"
+    AGENT_TRINO_CERT_PATH: str | None = None
+    AGENT_TRINO_KEY_PATH: str | None = None
+    AGENT_TRINO_VERIFY: bool | str = True
+    AGENT_TRINO_REQUEST_TIMEOUT: float = 60.0
+    # Same cap as Jeen run_query, so both results are truncated alike
+    AGENT_TRINO_MAX_ROWS: int = 1000
+
     # ── Agent (legacy REST chat endpoint) ───────────────────────────────────────
     AGENT_URL: str = "http://localhost:8000"
     AGENT_ENDPOINT: str = "/api/agent/chat"

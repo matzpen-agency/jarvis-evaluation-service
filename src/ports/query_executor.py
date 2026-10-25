@@ -1,7 +1,8 @@
 """
 query_executor.py — Abstract interface for executing SQL queries.
 
-Implementations: TrinoQueryExecutor
+Implementations: TrinoQueryExecutor, JeenQueryExecutor
+AgentSqlExecutor implementations: AgentTrinoQueryExecutor
 Future:         SnowflakeQueryExecutor, BigQueryQueryExecutor, DuckDBQueryExecutor, ...
 """
 
@@ -36,4 +37,20 @@ class QueryExecutor(ABC):
             QueryResult with rows, columns, timing and error info.
             Never raises on SQL errors — errors are captured in QueryResult.
         """
+        ...
+
+
+class AgentSqlExecutor(QueryExecutor):
+    """
+    Runs the agent's generated SQL on the engine the agent itself queried
+    (e.g. its Trino catalog), for the connections that engine covers.
+
+    Column types can differ between that engine and the connection's own
+    database (Postgres money is varchar in Trino), so SQL the agent wrote and
+    tested there may not run on the database directly.
+    """
+
+    @abstractmethod
+    def covers(self, connection_id: int | None) -> bool:
+        """Whether the agent's engine serves this connection's data."""
         ...

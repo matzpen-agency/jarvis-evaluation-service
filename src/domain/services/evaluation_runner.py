@@ -34,7 +34,7 @@ from src.domain.services.metrics_aggregator import MetricsAggregator, SampleReco
 from src.ports.agent_client import AgentClient
 from src.ports.connection_metadata_provider import ConnectionMetadataProvider
 from src.ports.dataset_provider import DatasetProvider
-from src.ports.query_executor import QueryExecutor
+from src.ports.query_executor import AgentSqlExecutor, QueryExecutor
 from src.ports.trace_reporter import TraceReporter
 
 logger = structlog.get_logger(__name__)
@@ -67,6 +67,7 @@ class EvaluationRunner:
         metadata_provider: ConnectionMetadataProvider | None = None,
         agent_dialect: str = "trino",
         numeric_tolerance: int = 6,
+        agent_executor: AgentSqlExecutor | None = None,
     ) -> None:
         self._dataset_provider = dataset_provider
         self._agent_client = agent_client
@@ -80,6 +81,7 @@ class EvaluationRunner:
         self._metadata_provider = metadata_provider
         self._agent_dialect = agent_dialect
         self._numeric_tolerance = numeric_tolerance
+        self._agent_executor = agent_executor
 
     async def run(
         self,
@@ -256,12 +258,19 @@ class EvaluationRunner:
                 dialect=dialect,
                 agent_dialect=self._agent_dialect,
                 schema_map=schema_map or {},
+                generated_on_agent_engine=bool(
+                    self._agent_executor
+                    and self._agent_executor.covers(agent_kwargs.get("connection_id"))
+                ),
             )
             self._adapt_expected_sql(context)
             context.metadata["evaluation_config"] = {
                 "numeric_tolerance": self._numeric_tolerance,
                 "connection_dialect": dialect,
                 "agent_dialect": self._agent_dialect,
+                "generated_sql_engine": (
+                    "agent_trino" if context.generated_on_agent_engine else "connection"
+                ),
             }
 
             results: list[EvaluationResult]
@@ -410,11 +419,18 @@ class EvaluationRunner:
 
     async def _execute_generated(self, context: EvaluationContext) -> None:
         """
-        Run the agent's SQL on the connection. The agent writes SQL for its own
-        engine (Trino); when that fails on a connection with another dialect,
-        retry once with the SQL transpiled to the connection's dialect.
+        Run the agent's SQL where the agent ran it: on its own engine when that
+        engine covers the connection. Otherwise run it on the connection; the
+        agent writes SQL for its own engine (Trino), so when that fails on a
+        connection with another dialect, retry once transpiled to that dialect.
         """
         sql = context.generated_sql or ""
+        if context.generated_on_agent_engine:
+            context.executed_generated_sql = sql
+            context.generated_result = await self._safe_execute(
+                sql, context.connection_id, self._agent_executor
+            )
+            return
         result = await self._safe_execute(sql, context.connection_id)
         context.executed_generated_sql = sql
         context.generated_result = result
@@ -449,15 +465,21 @@ class EvaluationRunner:
         generated_sql = context.executed_generated_sql or context.generated_sql or ""
         exp_total, gen_total = await asyncio.gather(
             self._count_rows(context.expected_sql, context.connection_id),
-            self._count_rows(generated_sql, context.connection_id),
+            self._count_rows(
+                generated_sql,
+                context.connection_id,
+                self._agent_executor if context.generated_on_agent_engine else None,
+            ),
         )
         expected.total_row_count = exp_total
         generated.total_row_count = gen_total
 
-    async def _count_rows(self, sql: str, connection_id: int | None) -> int | None:
+    async def _count_rows(
+        self, sql: str, connection_id: int | None, executor: QueryExecutor | None = None
+    ) -> int | None:
         inner = sql.strip().rstrip(";")
         result = await self._safe_execute(
-            f"SELECT COUNT(*) FROM ({inner}) AS __eval_count", connection_id
+            f"SELECT COUNT(*) FROM ({inner}) AS __eval_count", connection_id, executor
         )
         if not result.success or not result.rows:
             return None
@@ -466,9 +488,13 @@ class EvaluationRunner:
         except (TypeError, ValueError):
             return None
 
-    async def _safe_execute(self, sql: str, connection_id: int | None) -> QueryResult:
+    async def _safe_execute(
+        self, sql: str, connection_id: int | None, executor: QueryExecutor | None = None
+    ) -> QueryResult:
         try:
-            return await self._query_executor.execute(sql, connection_id=connection_id)
+            return await (executor or self._query_executor).execute(
+                sql, connection_id=connection_id
+            )
         except Exception as exc:
             logger.error("evaluation_runner.sql_execution_error", error=str(exc))
             return QueryResult.failure(f"execution error: {exc}")

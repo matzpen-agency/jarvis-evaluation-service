@@ -68,6 +68,22 @@ class Settings(BaseSettings):
     JEEN_RUN_QUERY_MAX_ROWS: int = 1000
     JEEN_MAX_CONCURRENT_QUERIES: int = 4
 
+    # ── LLM (order judge) ─────────────────────────────────────────────────────
+    # Any OpenAI-compatible Chat Completions endpoint. Private network: set
+    # LLM_BASE_URL to the AI service and LLM_MODEL to e.g. Qwen/Qwen3.6-27B-FP8,
+    # Qwen/Qwen3.8-27B-FP8 or openai/gpt-oss-120b. Outside it, OPENAI_API_KEY
+    # alone uses OpenAI with the default model.
+    LLM_API_KEY: SecretStr = SecretStr("")
+    OPENAI_API_KEY: SecretStr = SecretStr("")
+    LLM_BASE_URL: str = "https://api.openai.com/v1"
+    LLM_MODEL: str = "gpt-4.1-mini"
+    LLM_TIMEOUT: float = 60.0
+    # Decide "does the question ask for an order?" when rows match but order
+    # differs and the golden SQL has ORDER BY without LIMIT
+    ORDER_JUDGE_ENABLED: bool = True
+    # Saved decisions per question (stable across runs); relative to project root
+    ORDER_JUDGE_CACHE_PATH: str = "data/order_judgments.json"
+
     # ── Backend (for resolving production tables and query execution) ─────────
     BACKEND_URL: str = "http://localhost:8000"
     BACKEND_QUERY_ENDPOINT: str = "/api/query/execute"
@@ -116,6 +132,11 @@ class Settings(BaseSettings):
     def agent_chat_url(self) -> str:
         """Full agent chat endpoint URL."""
         return f"{self.AGENT_URL}{self.AGENT_ENDPOINT}"
+
+    @property
+    def llm_api_key(self) -> str:
+        """LLM_API_KEY, falling back to OPENAI_API_KEY."""
+        return self.LLM_API_KEY.get_secret_value() or self.OPENAI_API_KEY.get_secret_value()
 
     @property
     def is_langfuse_configured(self) -> bool:

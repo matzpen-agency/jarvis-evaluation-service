@@ -266,7 +266,16 @@ async def test_shift_respects_expected_order_by(sample_dataset_item):
         return QueryResult(success=True, rows=[[1], [2]], columns=["order_date"])
 
     executor.execute = AsyncMock(side_effect=mock_execute)
-    evaluator = TimeShiftEvaluator(query_executor=executor, offsets_days=[-1])
+
+    class AsksForOrder:
+        async def requires_order(self, question):
+            from src.ports.order_judge import OrderDecision
+
+            return OrderDecision(True, "asks for chronological order", "llm")
+
+    evaluator = TimeShiftEvaluator(
+        query_executor=executor, offsets_days=[-1], order_judge=AsksForOrder()
+    )
     ctx = _ctx(
         sample_dataset_item,
         expected_sql="SELECT order_date FROM orders ORDER BY order_date",

@@ -11,6 +11,9 @@ services:
       - .env
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      # Saved order-judge decisions survive rebuilds
+      - ./data:/app/data
     restart: unless-stopped
     networks:
       - default

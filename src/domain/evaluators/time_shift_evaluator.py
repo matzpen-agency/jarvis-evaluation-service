@@ -29,14 +29,12 @@ from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
 from src.domain.evaluators.base_evaluator import BaseEvaluator
 from src.domain.evaluators.sql_comparison_utils import (
-    _requires_order_by,
     compare_results,
+    compare_with_order_policy,
     dynamically_wrap_with_yaml_cte,
-    evaluate_contains,
-    grading_for,
-    order_key_indices,
 )
 from src.domain.services.deadline import run_with_deadline
+from src.ports.order_judge import OrderJudge
 from src.ports.query_executor import QueryExecutor
 
 logger = structlog.get_logger(__name__)
@@ -55,12 +53,14 @@ class TimeShiftEvaluator(BaseEvaluator):
         numeric_tolerance: int = 6,
         table_resolver=None,
         shift_timeout_seconds: float = 180.0,
+        order_judge: OrderJudge | None = None,
     ) -> None:
         self._executor = query_executor
         self._offsets = offsets_days if offsets_days is not None else [-1, -7, -14, -30, -60]
         self._numeric_tolerance = numeric_tolerance
         self._resolver = table_resolver
         self._shift_timeout = shift_timeout_seconds
+        self._order_judge = order_judge
 
     @property
     def name(self) -> str:
@@ -112,13 +112,10 @@ class TimeShiftEvaluator(BaseEvaluator):
                 schema_available=bool(schema_map),
             )
 
-        requires_ordering = grading_for(context).mode == "list" or _requires_order_by(
-            context.expected_sql, dialect
-        )
         outcomes = await asyncio.gather(
             *(
                 self._evaluate_shift(
-                    context, offset, exp_sql, gen_sql, requires_ordering
+                    context, offset, exp_sql, gen_sql
                 )
                 for offset, exp_sql, gen_sql in shifted_pairs
             ),
@@ -185,7 +182,6 @@ class TimeShiftEvaluator(BaseEvaluator):
         offset_days: int,
         expected_sql: str,
         generated_sql: str,
-        requires_ordering: bool,
     ) -> dict[str, Any]:
         """Execute one shifted pair and compare with the contains check."""
         try:
@@ -221,18 +217,15 @@ class TimeShiftEvaluator(BaseEvaluator):
                 "generated_error": generated_result.error,
             }
 
-        order_keys = (
-            order_key_indices(expected_sql, expected_result.columns, context.dialect)
-            if requires_ordering
-            else None
-        )
-        score, details = evaluate_contains(
-            expected_result=expected_result,
-            generated_result=generated_result,
+        # Same order rule as contains accuracy (the judge's decision is cached)
+        score, details = await compare_with_order_policy(
+            context,
+            expected_result,
+            generated_result,
+            allow_extra_columns=True,
             numeric_tolerance=self._numeric_tolerance,
-            requires_ordering=requires_ordering,
-            order_keys=order_keys,
-            grading=grading_for(context),
+            order_judge=self._order_judge,
+            expected_sql=expected_sql,
         )
         if details.get("inconclusive"):
             status = "inconclusive"

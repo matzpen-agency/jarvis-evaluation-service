@@ -218,3 +218,6 @@ __marimo__/
 .streamlit/secrets.toml
 skills/
 .DS_Store
+
+# Saved order-judge decisions (runtime data)
+/data/

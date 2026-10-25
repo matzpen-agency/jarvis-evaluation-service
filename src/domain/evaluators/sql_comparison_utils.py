@@ -724,12 +724,110 @@ def grading_for(context: Any) -> Grading:
     return parse_grading_method(metadata.get("grading_method"))
 
 
-def evaluate_execution_match(
+def _has_outer_limit(sql: str | None, dialect: str | None = None) -> bool:
+    parsed = safe_parse(sql, dialect)
+    return parsed is not None and (
+        node_arg(parsed, "limit") is not None or parsed.args.get("fetch") is not None
+    )
+
+
+async def compare_with_order_policy(
+    context: Any,
+    expected_result: Any,
+    generated_result: Any,
+    *,
+    allow_extra_columns: bool,
+    numeric_tolerance: int,
+    order_judge: Any = None,
+    expected_sql: str | None = None,
+) -> tuple[float, dict[str, Any]]:
+    """
+    Compare results, deciding automatically whether row order counts.
+
+      - explicit per-question grading (e.g. BIRD "list"/"set") is followed as is
+      - no outer ORDER BY in the golden SQL → order ignored
+      - ORDER BY with LIMIT → order ignored; the ordering already decides
+        WHICH rows come back, so a wrong order shows up as wrong rows
+      - ORDER BY without LIMIT → rows compared first; if they match but come
+        back in another order, the order judge decides from the question
+        whether order was asked for (decision + reason in details). When no
+        decision is possible the result passes, flagged "order not verified".
+    """
+    expected_sql = expected_sql or context.expected_sql
+    grading = grading_for(context)
+    if grading.mode != "default":
+        requires_ordering = grading.mode == "list"
+        keys = (
+            order_key_indices(expected_sql, expected_result.columns, context.dialect)
+            if requires_ordering and expected_result is not None
+            else None
+        )
+        return compare_results(
+            expected_result,
+            generated_result,
+            allow_extra_columns=allow_extra_columns,
+            requires_ordering=requires_ordering,
+            order_keys=keys,
+            numeric_tolerance=numeric_tolerance,
+            grading=grading,
+        )
+
+    score, details = compare_results(
+        expected_result,
+        generated_result,
+        allow_extra_columns=allow_extra_columns,
+        requires_ordering=False,
+        numeric_tolerance=numeric_tolerance,
+    )
+    if not _requires_order_by(expected_sql, context.dialect):
+        return score, details
+    if _has_outer_limit(expected_sql, context.dialect):
+        details["order_policy"] = "ignored: ORDER BY with LIMIT (rows decide)"
+        return score, details
+    if score < 1.0 or details.get("inconclusive") or details.get("empty_result"):
+        return score, details
+
+    order_keys = order_key_indices(expected_sql, expected_result.columns, context.dialect)
+    ordered_score, _ = compare_results(
+        expected_result,
+        generated_result,
+        allow_extra_columns=allow_extra_columns,
+        requires_ordering=True,
+        order_keys=order_keys,
+        numeric_tolerance=numeric_tolerance,
+    )
+    if ordered_score >= 1.0:
+        details["order_policy"] = "order matches"
+        return score, details
+
+    decision = await order_judge.requires_order(context.query) if order_judge else None
+    if decision is not None and decision.requires_order is not None:
+        details["order_judgment"] = {
+            "requires_order": decision.requires_order,
+            "reason": decision.reason,
+            "source": decision.source,
+        }
+    if decision is not None and decision.requires_order:
+        details["order_policy"] = "order differs; the question asks for an order"
+        details["reason"] = "row_order_mismatch"
+        return 0.0, details
+    if decision is not None and decision.requires_order is False:
+        details["order_policy"] = "order differs; the question does not ask for an order"
+        return score, details
+    details["order_policy"] = "order differs; not verified (order judge unavailable)"
+    details["order_not_verified"] = True
+    if decision is not None:
+        details["order_judge_error"] = decision.reason
+    return score, details
+
+
+async def evaluate_execution_match(
     context: Any,
     evaluator_name: str,
     *,
     allow_extra_columns: bool,
     numeric_tolerance: int,
+    order_judge: Any = None,
 ) -> Any:
     """
     Score context.generated_result against context.expected_result.
@@ -756,25 +854,13 @@ def evaluate_execution_match(
             details={"reason": "no_generated_sql", "agent_error": context.error},
         )
 
-    grading = grading_for(context)
-    requires_ordering = grading.mode == "list" or _requires_order_by(
-        context.expected_sql, context.dialect
-    )
-    order_keys = (
-        order_key_indices(
-            context.expected_sql, context.expected_result.columns, context.dialect
-        )
-        if requires_ordering
-        else None
-    )
-    score, details = compare_results(
+    score, details = await compare_with_order_policy(
+        context,
         context.expected_result,
         context.generated_result,
         allow_extra_columns=allow_extra_columns,
-        requires_ordering=requires_ordering,
-        order_keys=order_keys,
         numeric_tolerance=numeric_tolerance,
-        grading=grading,
+        order_judge=order_judge,
     )
     if details.get("inconclusive"):
         reason = details.pop("reason")

@@ -89,19 +89,26 @@ async def test_ex_contains_extra_rows_fails(evaluator, sample_dataset_item):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_ex_contains_order_by_enforced(evaluator, sample_dataset_item):
-    """When expected_sql has ORDER BY, scrambled generated rows must return 0.0."""
-    # [3, 1, 2] != [1, 2, 3] in order → fail
+async def test_ex_contains_order_by_enforced(sample_dataset_item):
+    """ORDER BY without LIMIT + the question asks for an order → scrambled rows fail."""
+    from src.ports.order_judge import OrderDecision
+
+    class AsksForOrder:
+        async def requires_order(self, question):
+            return OrderDecision(True, "asks for ascending order", "llm")
+
     ctx = EvaluationContext(
-        dataset_item=sample_dataset_item, run_id="r", query="q",
+        dataset_item=sample_dataset_item, run_id="r", query="List v from lowest to highest",
         expected_sql="SELECT v FROM t ORDER BY v ASC", allowed_tables=[]
     )
     ctx.expected_result = QueryResult(success=True, rows=[[1], [2], [3]], columns=["v"], row_count=3)
     ctx.generated_result = QueryResult(success=True, rows=[[3], [1], [2]], columns=["v"], row_count=3)
 
-    result = await evaluator.evaluate(ctx)
+    result = await ContainsEvaluator(order_judge=AsksForOrder()).evaluate(ctx)
     assert result.score == 0.0
     assert result.passed is False
+    assert result.details["reason"] == "row_order_mismatch"
+    assert result.details["order_judgment"]["reason"] == "asks for ascending order"
 
 
 @pytest.mark.unit

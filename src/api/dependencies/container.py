@@ -55,12 +55,14 @@ from src.infrastructure.langfuse.langfuse_reporter import LangfuseReporter
 from src.infrastructure.langfuse.text_to_sql_dataset_item_parser import (
     TextToSqlDatasetItemParser,
 )
+from src.infrastructure.llm.llm_order_judge import LlmOrderJudge
 from src.infrastructure.text_to_sql_agent.mcp_agent_client import McpAgentClient
 from src.infrastructure.text_to_sql_agent.text_to_sql_agent_client import (
     TextToSqlAgentClient,
 )
 from src.infrastructure.trino.trino_query_executor import TrinoQueryExecutor
 from src.ports.connection_metadata_provider import ConnectionMetadataProvider
+from src.ports.order_judge import OrderJudge
 from src.ports.query_executor import QueryExecutor
 
 
@@ -87,11 +89,34 @@ def get_langfuse_client() -> lf_sdk.Langfuse | None:
 @lru_cache
 def _get_bird_loader() -> BirdDatasetLoader:
     settings = get_settings()
-    path = settings.BIRD_DATASET_PATH
-    if not os.path.isabs(path):
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-        path = os.path.join(project_root, path)
-    return BirdDatasetLoader(path=path, include_evidence=settings.BIRD_INCLUDE_EVIDENCE)
+    return BirdDatasetLoader(
+        path=_project_path(settings.BIRD_DATASET_PATH),
+        include_evidence=settings.BIRD_INCLUDE_EVIDENCE,
+    )
+
+
+def _project_path(path: str) -> str:
+    if os.path.isabs(path):
+        return path
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    return os.path.join(project_root, path)
+
+
+@lru_cache
+def _get_order_judge() -> OrderJudge | None:
+    """LLM order judge shared across requests (it caches decisions), or None
+    when disabled or no LLM key is configured."""
+    settings = get_settings()
+    api_key = settings.llm_api_key
+    if not settings.ORDER_JUDGE_ENABLED or not api_key:
+        return None
+    return LlmOrderJudge(
+        base_url=settings.LLM_BASE_URL,
+        api_key=api_key,
+        model=settings.LLM_MODEL,
+        timeout=settings.LLM_TIMEOUT,
+        cache_path=_project_path(settings.ORDER_JUDGE_CACHE_PATH),
+    )
 
 
 @lru_cache
@@ -199,10 +224,12 @@ def get_evaluation_engine(
     """
     evaluators = [
         ExecutionAccuracyEvaluator(
-            numeric_tolerance=settings.NUMERIC_COMPARISON_TOLERANCE
+            numeric_tolerance=settings.NUMERIC_COMPARISON_TOLERANCE,
+            order_judge=_get_order_judge(),
         ),
         ContainsEvaluator(
-            numeric_tolerance=settings.NUMERIC_COMPARISON_TOLERANCE
+            numeric_tolerance=settings.NUMERIC_COMPARISON_TOLERANCE,
+            order_judge=_get_order_judge(),
         ),
         SqlExactMatchEvaluator(),
         TimeShiftEvaluator(
@@ -211,6 +238,7 @@ def get_evaluation_engine(
             numeric_tolerance=settings.NUMERIC_COMPARISON_TOLERANCE,
             table_resolver=table_resolver,
             shift_timeout_seconds=settings.TIME_SHIFT_TIMEOUT,
+            order_judge=_get_order_judge(),
         ),
         ComponentMatchEvaluator(),
         SchemaValidityEvaluator(table_resolver=table_resolver),

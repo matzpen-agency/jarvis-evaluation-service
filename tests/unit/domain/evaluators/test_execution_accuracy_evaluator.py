@@ -105,12 +105,18 @@ async def test_none_results(evaluator, sample_context, sample_dataset_item):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_order_by_enforces_exact_ordered(evaluator, sample_dataset_item):
-    """When expected_sql contains ORDER BY, scrambled rows should score 0.0."""
+async def test_order_by_enforces_exact_ordered(sample_dataset_item):
+    """Scrambled rows fail only when the question asks for an order."""
+    from src.ports.order_judge import OrderDecision
+
+    class AsksForOrder:
+        async def requires_order(self, question):
+            return OrderDecision(True, "asks for ascending order", "llm")
+
     ctx = EvaluationContext(
         dataset_item=sample_dataset_item,
         run_id="run-x",
-        query="test",
+        query="List v from lowest to highest",
         expected_sql="SELECT v FROM t ORDER BY v ASC",
         allowed_tables=[],
     )
@@ -120,10 +126,9 @@ async def test_order_by_enforces_exact_ordered(evaluator, sample_dataset_item):
     ctx.generated_result = QueryResult(
         success=True, rows=[[3], [1], [2]], columns=["v"], row_count=3
     )
-    result = await evaluator.evaluate(ctx)
+    result = await ExecutionAccuracyEvaluator(order_judge=AsksForOrder()).evaluate(ctx)
     assert result.score == 0.0
     assert result.passed is False
-    assert result.details["requires_ordering"] is True
     assert result.details["reason"] == "row_order_mismatch"
 
 
@@ -147,5 +152,5 @@ async def test_order_by_matching_order_passes(evaluator, sample_dataset_item):
     result = await evaluator.evaluate(ctx)
     assert result.score == 1.0
     assert result.passed is True
-    assert result.details["requires_ordering"] is True
+    assert result.details["order_policy"] == "order matches"
 

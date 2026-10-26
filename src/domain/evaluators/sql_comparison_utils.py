@@ -865,6 +865,24 @@ async def compare_with_order_policy(
     return score, details
 
 
+# Errors that come from the database link, not from the SQL itself
+_INFRASTRUCTURE_ERROR_RE = re.compile(
+    r"connection attempt failed|could not connect|failed to connect|connection refused"
+    r"|connection reset|connection (?:was )?closed|server closed the connection"
+    r"|name or service not known|temporary failure in name resolution"
+    r"|statement timeout|timed out|timeout|deadline exceeded"
+    r"|service unavailable|bad gateway|gateway timeout|too many requests|rate limit"
+    r"|\b50[234]\b|\b429\b|JDBC_ERROR",
+    re.IGNORECASE,
+)
+
+
+def is_infrastructure_error(error: str | None) -> bool:
+    """True when a query failed because the database couldn't be reached or
+    didn't answer in time — which says nothing about the SQL."""
+    return bool(error) and _INFRASTRUCTURE_ERROR_RE.search(error) is not None
+
+
 def has_no_data(result: Any) -> bool:
     """No rows, or only NULLs (e.g. SUM over no rows): nothing to compare."""
     if result is None or getattr(result, "truncated", False):

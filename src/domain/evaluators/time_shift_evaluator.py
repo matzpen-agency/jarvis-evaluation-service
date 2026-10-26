@@ -14,7 +14,9 @@ For each configured offset (e.g. -1, -7, -14, -30, -60 days):
   3. Compare with the same contains check as the primary metric.
 
 Score = passing shifts / conclusive shifts. A shift is inconclusive (not
-counted) when the shifted golden SQL fails or both results are truncated.
+counted) when the shifted golden SQL fails, when either query fails because
+the database couldn't be reached or timed out, or when both results are
+truncated.
 Passed only when every conclusive shift passes. Not applicable when the
 referenced tables have no temporal columns — shifting would change nothing.
 """
@@ -34,6 +36,7 @@ from src.domain.evaluators.sql_comparison_utils import (
     compare_with_order_policy,
     dynamically_wrap_with_yaml_cte,
     has_no_data,
+    is_infrastructure_error,
 )
 from src.domain.services.deadline import run_with_deadline
 from src.ports.order_judge import OrderJudge
@@ -136,12 +139,11 @@ class TimeShiftEvaluator(BaseEvaluator):
         for (offset, _, _), outcome in zip(shifted_pairs, outcomes, strict=True):
             if isinstance(outcome, BaseException):
                 logger.warning("time_shift.shift_failed", offset_days=offset, error=str(outcome))
-                outcome = {
-                    "offset_days": offset,
-                    "status": "failed",
-                    "score": 0.0,
-                    "error": str(outcome) or type(outcome).__name__,
-                }
+                error = str(outcome) or type(outcome).__name__
+                if is_infrastructure_error(error) or isinstance(outcome, TimeoutError):
+                    outcome = {"offset_days": offset, "status": "inconclusive", "error": error}
+                else:
+                    outcome = {"offset_days": offset, "status": "failed", "score": 0.0, "error": error}
             shift_results.append(outcome)
 
         conclusive = [r for r in shift_results if r["status"] != "inconclusive"]
@@ -224,6 +226,14 @@ class TimeShiftEvaluator(BaseEvaluator):
                 "status": "inconclusive",
                 "reason": "shifted_expected_sql_failed",
                 "expected_error": expected_result.error,
+            }
+        if not generated_result.success and is_infrastructure_error(generated_result.error):
+            # The database link failed, not the agent's SQL
+            return {
+                "offset_days": offset_days,
+                "status": "inconclusive",
+                "reason": "shifted_generated_sql_infrastructure_error",
+                "generated_error": generated_result.error,
             }
         if not generated_result.success:
             return {

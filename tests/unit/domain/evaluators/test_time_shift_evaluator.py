@@ -14,7 +14,10 @@ import pytest
 
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.query_result import QueryResult
-from src.domain.evaluators.sql_comparison_utils import dynamically_wrap_with_yaml_cte
+from src.domain.evaluators.sql_comparison_utils import (
+    dynamically_wrap_with_yaml_cte,
+    is_infrastructure_error,
+)
 from src.domain.evaluators.time_shift_evaluator import TimeShiftEvaluator
 
 # ── dynamically_wrap_with_yaml_cte unit tests ─────────────────────────────────
@@ -371,3 +374,102 @@ async def test_unhandled_exception_returns_error_result():
     assert result.passed is False
     assert result.error is not None
     assert "expected_sql" in result.error
+
+
+# ── Database-link failures say nothing about the agent ───────────────────────
+
+JDBC_DOWN = (
+    'TrinoExternalError(type=EXTERNAL, name=JDBC_ERROR, message="The connection attempt failed.")'
+)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (JDBC_DOWN, True),
+        ("Query failed: canceling statement due to statement timeout", True),
+        ("[Errno -2] Name or service not known", True),
+        ("Server error '503 Service Unavailable'", True),
+        ("line 5:56: Table 'adventureworks.public.fact_sales' does not exist", False),
+        ("Query failed: function avg(money) does not exist", False),
+        ("Cannot cast '$2,024.99' to DOUBLE", False),
+        (None, False),
+    ],
+)
+def test_is_infrastructure_error(error, expected):
+    assert is_infrastructure_error(error) is expected
+
+
+def _executor_failing_generated(error: str, fail_offsets: set[int] | None = None):
+    calls = {"n": 0}
+
+    async def mock_execute(sql: str, connection_id: int | None = None) -> QueryResult:
+        if "generated_col" in sql:
+            calls["n"] += 1
+            if fail_offsets is None or calls["n"] in fail_offsets:
+                return QueryResult.failure(error)
+        return _rows(1)
+
+    executor = AsyncMock()
+    executor.execute = AsyncMock(side_effect=mock_execute)
+    return executor
+
+
+GENERATED = "SELECT order_date AS generated_col FROM orders"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_connection_failure_on_a_shift_is_inconclusive(sample_dataset_item):
+    """One shift loses the database link; the other passes → score 1.0."""
+    executor = _executor_failing_generated(JDBC_DOWN, fail_offsets={1})
+    evaluator = TimeShiftEvaluator(query_executor=executor, offsets_days=[-1, -7])
+
+    result = await evaluator.evaluate(_ctx(sample_dataset_item, generated_sql=GENERATED))
+
+    statuses = sorted(r["status"] for r in result.details["shift_results"])
+    assert statuses == ["inconclusive", "passed"]
+    assert result.details["conclusive_shifts"] == 1
+    assert result.score == 1.0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_all_shifts_losing_the_database_is_not_applicable(sample_dataset_item):
+    executor = _executor_failing_generated("canceling statement due to statement timeout")
+    evaluator = TimeShiftEvaluator(query_executor=executor, offsets_days=[-1, -7])
+
+    result = await evaluator.evaluate(_ctx(sample_dataset_item, generated_sql=GENERATED))
+
+    assert result.applicable is False
+    assert result.details["reason"] == "no_conclusive_shift"
+    assert all(
+        r["reason"] == "shifted_generated_sql_infrastructure_error"
+        for r in result.details["shift_results"]
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_sql_errors_on_a_shift_still_fail(sample_dataset_item):
+    executor = _executor_failing_generated("line 1:8: Column 'x' cannot be resolved")
+    evaluator = TimeShiftEvaluator(query_executor=executor, offsets_days=[-1])
+
+    result = await evaluator.evaluate(_ctx(sample_dataset_item, generated_sql=GENERATED))
+
+    assert result.score == 0.0
+    assert result.details["shift_results"][0]["status"] == "failed"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_raised_connection_errors_are_inconclusive(sample_dataset_item):
+    executor = AsyncMock()
+    executor.execute = AsyncMock(side_effect=ConnectionError("connection reset by peer"))
+    evaluator = TimeShiftEvaluator(query_executor=executor, offsets_days=[-1])
+
+    result = await evaluator.evaluate(_ctx(sample_dataset_item))
+
+    assert result.applicable is False
+    assert result.details["shift_results"][0]["status"] == "inconclusive"

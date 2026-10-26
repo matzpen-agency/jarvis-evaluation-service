@@ -25,14 +25,16 @@ from src.domain.evaluators.sql_comparison_utils import (
     parse_grading_method,
 )
 from src.domain.services.evaluation_runner import EvaluationRunner
+from src.infrastructure.bird.bird_benchmark_provider import BirdBenchmarkProvider
 from src.infrastructure.bird.bird_dataset_loader import (
     BirdDatasetLoader,
     bird_db_id_for_connection,
 )
 from src.infrastructure.langfuse.langfuse_dataset_provider import (
-    DatasetNotFoundError,
     LangfuseDatasetProvider,
 )
+from src.ports.benchmark_provider import BenchmarkProvider
+from src.ports.dataset_provider import DatasetNotFoundError
 
 ROWS = [
     {
@@ -111,7 +113,9 @@ def test_db_id_from_connection_name(name, db_id):
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_unknown_bird_database_lists_available_ones(loader):
-    provider = LangfuseDatasetProvider(client=None, parser=None, bird_loader=loader)
+    provider = LangfuseDatasetProvider(
+        client=None, parser=None, benchmark=BirdBenchmarkProvider(loader)
+    )
     with pytest.raises(DatasetNotFoundError, match="books, movie_platform"):
         await provider.get_dataset("bird-nope")
 
@@ -123,7 +127,9 @@ async def test_bird_items_are_synced_to_langfuse(loader):
     client.create_dataset = lambda **kw: None
     created = []
     client.create_dataset_item = lambda **kw: created.append(kw["id"])
-    provider = LangfuseDatasetProvider(client=client, parser=None, bird_loader=loader)
+    provider = LangfuseDatasetProvider(
+        client=client, parser=None, benchmark=BirdBenchmarkProvider(loader)
+    )
 
     items = await provider.get_dataset("bird-movie_platform")
     assert [i.id for i in items] == created == ["bird-11", "bird-12"]
@@ -131,12 +137,14 @@ async def test_bird_items_are_synced_to_langfuse(loader):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_use_case_resolves_bird_from_connection_name():
+async def test_use_case_resolves_bird_from_connection_name(loader):
     runner = AsyncMock(spec=EvaluationRunner)
     runner.run = AsyncMock(side_effect=RuntimeError("stop"))
     metadata = AsyncMock()
     metadata.get_connection_name = AsyncMock(return_value="bird_movie_platform")
-    use_case = RunMcpDatasetEvaluationUseCase(runner=runner, metadata_provider=metadata)
+    use_case = RunMcpDatasetEvaluationUseCase(
+        runner=runner, metadata_provider=metadata, benchmark=BirdBenchmarkProvider(loader)
+    )
 
     with pytest.raises(RuntimeError, match="stop"):
         await use_case.execute(RunMcpDatasetRequest(dataset_name="bird", connection_id=7))
@@ -144,18 +152,78 @@ async def test_use_case_resolves_bird_from_connection_name():
 
 
 @pytest.mark.unit
+@pytest.mark.asyncio
+async def test_connection_with_no_bird_name_is_a_clear_error(loader):
+    runner = AsyncMock(spec=EvaluationRunner)
+    metadata = AsyncMock()
+    metadata.get_connection_name = AsyncMock(return_value=None)
+    use_case = RunMcpDatasetEvaluationUseCase(
+        runner=runner, metadata_provider=metadata, benchmark=BirdBenchmarkProvider(loader)
+    )
+
+    with pytest.raises(DatasetNotFoundError, match="Name the connection after the BIRD db_id"):
+        await use_case.execute(RunMcpDatasetRequest(dataset_name="bird", connection_id=7))
+    runner.run.assert_not_called()
+
+
+class _OtherBenchmark(BenchmarkProvider):
+    """Any benchmark can replace BIRD by implementing the port."""
+
+    name = "spider"
+
+    def owns(self, dataset_name):
+        return dataset_name.startswith("spider-")
+
+    def dataset_for_connection(self, connection_name):
+        return f"spider-{connection_name}"
+
+    async def load(self, dataset_name):
+        return [DatasetItem(id="s1", input={"query": "q"}, expected_output={"sql": "SELECT 1"})]
+
+    def description(self, dataset_name):
+        return "other benchmark"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_another_benchmark_plugs_in_through_the_port():
+    runner = AsyncMock(spec=EvaluationRunner)
+    runner.run = AsyncMock(side_effect=RuntimeError("stop"))
+    metadata = AsyncMock()
+    metadata.get_connection_name = AsyncMock(return_value="concert_singer")
+    benchmark = _OtherBenchmark()
+    use_case = RunMcpDatasetEvaluationUseCase(
+        runner=runner, metadata_provider=metadata, benchmark=benchmark
+    )
+
+    with pytest.raises(RuntimeError, match="stop"):
+        await use_case.execute(RunMcpDatasetRequest(dataset_name="spider", connection_id=7))
+    assert runner.run.await_args.kwargs["dataset_name"] == "spider-concert_singer"
+
+    client = AsyncMock()
+    client.create_dataset = lambda **kw: None
+    client.create_dataset_item = lambda **kw: None
+    provider = LangfuseDatasetProvider(client=client, parser=None, benchmark=benchmark)
+    assert [i.id for i in await provider.get_dataset("spider-concert_singer")] == ["s1"]
+    # "bird" is no longer special once BIRD isn't the configured benchmark
+    with pytest.raises(RuntimeError, match="stop"):
+        await use_case.execute(RunMcpDatasetRequest(dataset_name="bird", connection_id=7))
+    assert runner.run.await_args.kwargs["dataset_name"] == "bird"
+
+
+@pytest.mark.unit
 def test_bundled_dataset_loads_without_network(monkeypatch):
     """Private-network deployments: loading BIRD must never touch the internet."""
-    from src.api.dependencies.container import _get_bird_loader
+    from src.api.dependencies.container import _get_benchmark_provider
 
     def no_network(*args, **kwargs):
         raise AssertionError("network access attempted")
 
     monkeypatch.setattr(socket, "create_connection", no_network)
     monkeypatch.setattr(socket.socket, "connect", no_network)
-    _get_bird_loader.cache_clear()
+    _get_benchmark_provider.cache_clear()
 
-    bird = _get_bird_loader()
+    bird = _get_benchmark_provider()._loader
     assert len(bird.db_ids()) == 69
     items = [i for db in bird.db_ids() for i in bird.load(db)]
     assert len(items) == 2462

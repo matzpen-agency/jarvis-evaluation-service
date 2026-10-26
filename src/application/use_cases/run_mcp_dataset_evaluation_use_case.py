@@ -24,11 +24,7 @@ from src.application.use_cases.run_dataset_evaluation_use_case import (
 )
 from src.domain.services.evaluation_runner import EvaluationRunner, ProgressCallback
 from src.domain.services.metrics_aggregator import MetricsAggregator
-from src.infrastructure.bird.bird_dataset_loader import (
-    BIRD_DATASET_PREFIX,
-    bird_db_id_for_connection,
-)
-from src.infrastructure.langfuse.langfuse_dataset_provider import DatasetNotFoundError
+from src.ports.benchmark_provider import BenchmarkProvider
 from src.ports.connection_metadata_provider import ConnectionMetadataProvider
 
 logger = structlog.get_logger(__name__)
@@ -47,27 +43,25 @@ class RunMcpDatasetEvaluationUseCase:
         self,
         runner: EvaluationRunner,
         metadata_provider: ConnectionMetadataProvider | None = None,
+        benchmark: BenchmarkProvider | None = None,
     ) -> None:
         self._runner = runner
         self._metadata_provider = metadata_provider
+        self._benchmark = benchmark
 
     async def _resolve_dataset_name(self, request: RunMcpDatasetRequest) -> str:
         """
-        "bird" means: the BIRD questions of the database this connection holds,
-        found by the connection's name (e.g. "movie_platform" → "bird-movie_platform").
+        The benchmark's name (e.g. "bird") means: its questions for the database
+        this connection holds, found by the connection's name
+        (e.g. "movie_platform" → "bird-movie_platform").
         """
-        if request.dataset_name.lower() != "bird":
+        benchmark = self._benchmark
+        if benchmark is None or request.dataset_name.lower() != benchmark.name:
             return request.dataset_name
         name = None
         if self._metadata_provider is not None:
             name = await self._metadata_provider.get_connection_name(request.connection_id)
-        db_id = bird_db_id_for_connection(name)
-        if not db_id:
-            raise DatasetNotFoundError(
-                f"Can't tell which BIRD database connection {request.connection_id} holds "
-                f"(connection name: {name!r}). Name the connection after the BIRD db_id."
-            )
-        return f"{BIRD_DATASET_PREFIX}{db_id}"
+        return benchmark.dataset_for_connection(name)
 
     async def execute(
         self,

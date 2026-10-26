@@ -4,8 +4,9 @@ langfuse_dataset_provider.py — Langfuse implementation of DatasetProvider.
 Loads dataset items from Langfuse and maps them to the generic DatasetItem
 domain entity using the configurable DatasetItemParser.
 
-Benchmark datasets ("bird-<db_id>") are built from their public source
-instead and upserted into Langfuse, so evaluation runs can be linked to them.
+Benchmark datasets (e.g. "bird-<db_id>") come from the configured
+BenchmarkProvider instead and are upserted into Langfuse, so evaluation runs
+can be linked to them.
 """
 
 from __future__ import annotations
@@ -16,18 +17,13 @@ import langfuse as lf_sdk
 import structlog
 
 from src.domain.entities.dataset_item import DatasetItem
-from src.infrastructure.bird.bird_dataset_loader import (
-    BIRD_DATASET_PREFIX,
-    BirdDatasetLoader,
-)
+from src.ports.benchmark_provider import BenchmarkProvider
 from src.ports.dataset_item_parser import DatasetItemParser
-from src.ports.dataset_provider import DatasetProvider
+from src.ports.dataset_provider import DatasetNotFoundError, DatasetProvider
 
 logger = structlog.get_logger(__name__)
 
-
-class DatasetNotFoundError(Exception):
-    """Raised when the requested dataset does not exist in Langfuse."""
+__all__ = ["DatasetNotFoundError", "LangfuseDatasetProvider"]
 
 
 class LangfuseDatasetProvider(DatasetProvider):
@@ -42,11 +38,11 @@ class LangfuseDatasetProvider(DatasetProvider):
         self,
         client: lf_sdk.Langfuse,
         parser: DatasetItemParser,
-        bird_loader: BirdDatasetLoader | None = None,
+        benchmark: BenchmarkProvider | None = None,
     ) -> None:
         self._client = client
         self._parser = parser
-        self._bird_loader = bird_loader
+        self._benchmark = benchmark
 
     async def get_dataset(self, name: str) -> list[DatasetItem]:
         """
@@ -56,14 +52,10 @@ class LangfuseDatasetProvider(DatasetProvider):
             DatasetNotFoundError: If the dataset does not exist.
         """
         logger.info("langfuse_dataset_provider.loading", dataset_name=name)
-        if name.lower().startswith(BIRD_DATASET_PREFIX):
-            items = await self._load_bird(name)
+        if self._benchmark is not None and self._benchmark.owns(name):
+            items = await self._benchmark.load(name)
             await asyncio.to_thread(
-                self._sync_to_langfuse,
-                name,
-                items,
-                f"BIRD-Verified benchmark questions for database "
-                f"'{name[len(BIRD_DATASET_PREFIX):]}'",
+                self._sync_to_langfuse, name, items, self._benchmark.description(name)
             )
             return items
 
@@ -112,20 +104,6 @@ class LangfuseDatasetProvider(DatasetProvider):
             dataset_name=name,
             total_items=len(items),
         )
-        return items
-
-    async def _load_bird(self, dataset_name: str) -> list[DatasetItem]:
-        if self._bird_loader is None:
-            raise DatasetNotFoundError("BIRD datasets are not configured on this service.")
-        db_id = dataset_name[len(BIRD_DATASET_PREFIX):].strip().lower()
-        items = await asyncio.to_thread(self._bird_loader.load, db_id)
-        if not items:
-            available = await asyncio.to_thread(self._bird_loader.db_ids)
-            raise DatasetNotFoundError(
-                f"No BIRD questions for database '{db_id}'. The connection's name must "
-                f"be a BIRD database id, one of: {', '.join(available)}"
-            )
-        logger.info("langfuse_dataset_provider.bird_loaded", db_id=db_id, items=len(items))
         return items
 
     def _sync_to_langfuse(

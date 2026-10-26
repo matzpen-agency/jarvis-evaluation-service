@@ -41,6 +41,7 @@ from src.domain.metrics.composite_score_calculator import CompositeWeights
 from src.domain.services.evaluation_engine import EvaluationEngine
 from src.domain.services.evaluation_runner import EvaluationRunner
 from src.domain.services.metrics_aggregator import MetricsAggregator
+from src.infrastructure.bird.bird_benchmark_provider import BirdBenchmarkProvider
 from src.infrastructure.bird.bird_dataset_loader import BirdDatasetLoader
 from src.infrastructure.jeen.jeen_metadata_client import (
     JeenConnectionMetadataProvider,
@@ -65,6 +66,7 @@ from src.infrastructure.trino.agent_trino_query_executor import (
     parse_catalog_map,
 )
 from src.infrastructure.trino.trino_query_executor import TrinoQueryExecutor
+from src.ports.benchmark_provider import BenchmarkProvider
 from src.ports.connection_metadata_provider import ConnectionMetadataProvider
 from src.ports.order_judge import OrderJudge
 from src.ports.query_executor import AgentSqlExecutor, QueryExecutor
@@ -91,11 +93,15 @@ def get_langfuse_client() -> lf_sdk.Langfuse | None:
 
 
 @lru_cache
-def _get_bird_loader() -> BirdDatasetLoader:
+def _get_benchmark_provider() -> BenchmarkProvider:
+    """The public benchmark offered as dataset "<benchmark name>" (BIRD).
+    To use another benchmark, return its BenchmarkProvider adapter here."""
     settings = get_settings()
-    return BirdDatasetLoader(
-        path=_project_path(settings.BIRD_DATASET_PATH),
-        include_evidence=settings.BIRD_INCLUDE_EVIDENCE,
+    return BirdBenchmarkProvider(
+        BirdDatasetLoader(
+            path=_project_path(settings.BIRD_DATASET_PATH),
+            include_evidence=settings.BIRD_INCLUDE_EVIDENCE,
+        )
     )
 
 
@@ -331,7 +337,7 @@ def get_run_dataset_use_case(
     dataset_provider = LangfuseDatasetProvider(
         client=langfuse_client,
         parser=parser,
-        bird_loader=_get_bird_loader(),
+        benchmark=_get_benchmark_provider(),
     )
     agent_client = TextToSqlAgentClient(settings=settings)
     reporter = LangfuseReporter(client=langfuse_client)
@@ -374,7 +380,7 @@ def get_run_mcp_dataset_use_case(
     dataset_provider = LangfuseDatasetProvider(
         client=langfuse_client,
         parser=parser,
-        bird_loader=_get_bird_loader(),
+        benchmark=_get_benchmark_provider(),
     )
     agent_client = McpAgentClient(settings=settings)
     reporter = LangfuseReporter(client=langfuse_client)
@@ -395,4 +401,8 @@ def get_run_mcp_dataset_use_case(
         agent_executor=_get_agent_executor(),
     )
 
-    return RunMcpDatasetEvaluationUseCase(runner=runner, metadata_provider=metadata_provider)
+    return RunMcpDatasetEvaluationUseCase(
+        runner=runner,
+        metadata_provider=metadata_provider,
+        benchmark=_get_benchmark_provider(),
+    )

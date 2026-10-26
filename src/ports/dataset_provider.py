@@ -12,6 +12,10 @@ from abc import ABC, abstractmethod
 from src.domain.entities.dataset_item import DatasetItem
 
 
+class DatasetNotFoundError(Exception):
+    """Raised when the requested dataset does not exist."""
+
+
 class DatasetProvider(ABC):
     """
     Generic interface for retrieving evaluation datasets.

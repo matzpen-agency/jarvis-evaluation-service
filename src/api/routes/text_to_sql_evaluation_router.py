@@ -37,7 +37,7 @@ from src.application.use_cases.run_dataset_evaluation_use_case import (
 from src.application.use_cases.run_mcp_dataset_evaluation_use_case import (
     RunMcpDatasetEvaluationUseCase,
 )
-from src.infrastructure.langfuse.langfuse_dataset_provider import DatasetNotFoundError
+from src.ports.dataset_provider import DatasetNotFoundError
 
 logger = structlog.get_logger(__name__)
 

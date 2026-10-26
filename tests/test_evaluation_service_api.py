@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
+from src.api.dependencies.container import get_langfuse_client
 from src.main import app
 from src.application.dto.run_dataset_response import RunDatasetResponse
 from src.domain.entities.agent_response import AgentResponse
@@ -10,6 +11,16 @@ from src.domain.entities.evaluation_result import EvaluationResult
 from src.domain.entities.query_result import QueryResult
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def no_real_langfuse():
+    # Keep test traces and scores out of the real Langfuse project a developer
+    # .env points at: with no client the reporter is disabled
+    app.dependency_overrides[get_langfuse_client] = lambda: None
+    yield
+    app.dependency_overrides.pop(get_langfuse_client, None)
+
 
 @pytest.fixture
 def mock_agent_client():

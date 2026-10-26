@@ -222,3 +222,6 @@ skills/
 # Saved order-judge decisions (runtime data)
 /data/
 /certs/
+
+# Image tarballs from scripts/build_image_tgz.sh
+/dist/

@@ -77,6 +77,9 @@ class MetricsAggregator:
         # ── Latency ───────────────────────────────────────────────────────────
         latencies = [ctx.total_latency_ms for ctx in contexts]
         latency_stats = self._latency_calc.calculate(latencies)
+        agent_latency_stats = self._latency_calc.calculate(
+            [ctx.agent_latency_ms for ctx in contexts if ctx.generated_sql]
+        )
 
         # ── Accuracy (per-evaluator averages) ─────────────────────────────────
         accuracy = self._compute_accuracy_stats(all_results)
@@ -161,6 +164,7 @@ class MetricsAggregator:
             failed=failed,
             failure_rate=failure_rate,
             latency=latency_stats,
+            agent_latency=agent_latency_stats,
             accuracy=accuracy,
             failure_analysis=failure_analysis,
             iteration_stats=iteration_stats,

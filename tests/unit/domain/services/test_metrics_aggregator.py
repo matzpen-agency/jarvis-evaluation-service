@@ -119,3 +119,26 @@ def test_aggregate_successful_and_failed_records(aggregator, sample_dataset_item
 
     assert run.failure_analysis.total_failures == 1
     assert run.failure_analysis.agent_crash_count == 1
+
+
+@pytest.mark.unit
+def test_agent_latency_counts_only_questions_with_sql(aggregator, sample_dataset_item):
+    def ctx(agent_ms: float, sql: str | None) -> SampleRecord:
+        c = EvaluationContext(
+            dataset_item=sample_dataset_item, run_id="r", query="q", expected_sql="SELECT 1",
+            allowed_tables=[],
+        )
+        c.generated_sql = sql
+        c.agent_latency_ms = agent_ms
+        return SampleRecord(context=c, results=[])
+
+    run = aggregator.aggregate(
+        dataset_name="d",
+        run_id="r",
+        run_name="r",
+        records=[ctx(10_000.0, "SELECT 1"), ctx(30_000.0, "SELECT 2"), ctx(120_000.0, None)],
+        started_at=datetime.now(tz=UTC),
+    )
+
+    assert run.agent_latency.total_samples == 2
+    assert run.agent_latency.average == 20_000.0

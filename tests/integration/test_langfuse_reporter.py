@@ -18,7 +18,10 @@ from src.domain.entities.dataset_run import (
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
 from src.domain.entities.query_result import QueryResult
-from src.infrastructure.langfuse.langfuse_reporter import LangfuseReporter
+from src.infrastructure.langfuse.langfuse_reporter import (
+    AGENT_SQL_GENERATION_SCORE,
+    LangfuseReporter,
+)
 
 
 @pytest.fixture
@@ -264,7 +267,8 @@ async def test_not_applicable_results_are_not_scored(mock_langfuse_sdk_client, s
     )
 
     scored = [c.kwargs["name"] for c in mock_langfuse_sdk_client.create_score.call_args_list]
-    assert scored == ["component_match"]  # errors count as 0, N/A is skipped
+    # errors count as 0, N/A is skipped
+    assert scored == ["agent_sql_generation_seconds", "component_match"]
 
 
 @pytest.mark.integration
@@ -348,3 +352,69 @@ async def test_flush(mock_langfuse_sdk_client):
     await reporter.flush()
     mock_langfuse_sdk_client.flush.assert_called_once()
 
+
+
+def _score_calls(client, name):
+    return [c.kwargs for c in client.create_score.call_args_list if c.kwargs["name"] == name]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_agent_sql_generation_time_is_scored_in_seconds(
+    mock_langfuse_sdk_client, sample_dataset_item
+):
+    reporter = LangfuseReporter(client=mock_langfuse_sdk_client)
+    ctx = _sample_context(sample_dataset_item)
+    ctx.agent_latency_ms = 12_345.0
+
+    await reporter.report_sample(
+        context=ctx, results=[], parent_trace_id="p", dataset_item_id="item-001", run_name="run"
+    )
+
+    [score] = _score_calls(mock_langfuse_sdk_client, AGENT_SQL_GENERATION_SCORE)
+    assert score["value"] == 12.35
+    assert score["data_type"] == "NUMERIC"
+    agent_span = next(
+        c for c in mock_langfuse_sdk_client.start_span.call_args_list
+        if c.kwargs["name"] == "agent_execution"
+    )
+    assert agent_span.kwargs["metadata"]["sql_generation_seconds"] == 12.35
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_no_generation_time_score_without_sql(mock_langfuse_sdk_client, sample_dataset_item):
+    reporter = LangfuseReporter(client=mock_langfuse_sdk_client)
+    ctx = _sample_context(sample_dataset_item)
+    ctx.generated_sql = None
+    ctx.agent_latency_ms = 120_000.0  # e.g. the agent timed out
+
+    await reporter.report_sample(
+        context=ctx, results=[], parent_trace_id="p", dataset_item_id="item-001", run_name="run"
+    )
+
+    assert _score_calls(mock_langfuse_sdk_client, AGENT_SQL_GENERATION_SCORE) == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_run_summary_has_agent_generation_time(mock_langfuse_sdk_client):
+    reporter = LangfuseReporter(client=mock_langfuse_sdk_client)
+    run = DatasetRun(
+        dataset_name="d",
+        run_id="r",
+        run_name="r",
+        started_at=MagicMock(),
+        total_cases=2,
+        agent_latency=LatencyStats(p50=20_000.0, p95=41_000.0, average=25_500.0, total_samples=2),
+    )
+
+    await reporter.report_run_summary(run=run, trace_id="t")
+
+    values = {
+        c.kwargs["name"]: c.kwargs["value"]
+        for c in mock_langfuse_sdk_client.create_score.call_args_list
+    }
+    assert values["avg_agent_sql_generation_seconds"] == 25.5
+    assert values["p50_agent_sql_generation_seconds"] == 20.0
+    assert values["p95_agent_sql_generation_seconds"] == 41.0

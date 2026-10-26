@@ -35,6 +35,13 @@ from src.ports.trace_reporter import TraceReporter
 logger = structlog.get_logger(__name__)
 
 
+AGENT_SQL_GENERATION_SCORE = "agent_sql_generation_seconds"
+
+
+def _seconds(ms: float) -> float:
+    return round((ms or 0.0) / 1000, 2)
+
+
 class LangfuseReporter(TraceReporter):
     """
     Publishes evaluation traces, spans, and scores to Langfuse.
@@ -139,6 +146,7 @@ class LangfuseReporter(TraceReporter):
                 },
                 metadata={
                     "latency_ms": context.agent_latency_ms,
+                    "sql_generation_seconds": _seconds(context.agent_latency_ms),
                     "agent_crashed": context.agent_crashed,
                     "timed_out": context.timed_out,
                 },
@@ -165,6 +173,18 @@ class LangfuseReporter(TraceReporter):
                     metadata={"execution_time_ms": context.generated_result.execution_time_ms},
                 )
                 gen_span.end()
+
+            # ── Agent SQL generation time ─────────────────────────────────────
+            # A score (not just metadata) so it shows as a column in the dataset
+            # run and is averaged per run in Langfuse
+            if context.generated_sql:
+                self._client.create_score(  # type: ignore[union-attr]
+                    trace_id=trace_id,
+                    name=AGENT_SQL_GENERATION_SCORE,
+                    value=_seconds(context.agent_latency_ms),
+                    comment="seconds from sending the question to the agent until it returned SQL",
+                    data_type="NUMERIC",
+                )
 
             # ── Evaluator scores ──────────────────────────────────────────────
             for result in results:
@@ -218,6 +238,9 @@ class LangfuseReporter(TraceReporter):
                 ("failure_rate", run.failure_analysis.failure_rate),
                 ("pass_rate", run.passed / run.total_cases if run.total_cases > 0 else 0.0),
                 ("p95_latency_ms", run.latency.p95),
+                ("avg_agent_sql_generation_seconds", _seconds(run.agent_latency.average)),
+                ("p50_agent_sql_generation_seconds", _seconds(run.agent_latency.p50)),
+                ("p95_agent_sql_generation_seconds", _seconds(run.agent_latency.p95)),
                 ("average_total_execution_time_ms", run.performance.average_total_execution_time_ms),
                 ("average_time_to_first_row_ms", run.performance.average_time_to_first_row_ms),
                 ("average_token_usage", run.performance.average_token_usage),
@@ -355,6 +378,7 @@ class LangfuseReporter(TraceReporter):
         meta = {
             "total_latency_ms": context.total_latency_ms,
             "agent_latency_ms": context.agent_latency_ms,
+            "agent_sql_generation_seconds": _seconds(context.agent_latency_ms),
             "agent_crashed": context.agent_crashed,
             "timed_out": context.timed_out,
             "error": context.error,

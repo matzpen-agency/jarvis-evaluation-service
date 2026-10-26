@@ -133,6 +133,8 @@ class DatasetRun:
 
     # ── Metrics ───────────────────────────────────────────────────────────────
     latency: LatencyStats = field(default_factory=LatencyStats)
+    # Time the agent took to generate SQL (questions where it returned SQL)
+    agent_latency: LatencyStats = field(default_factory=LatencyStats)
     accuracy: AccuracyStats = field(default_factory=AccuracyStats)
     failure_analysis: FailureAnalysis = field(default_factory=FailureAnalysis)
     iteration_stats: IterationStats = field(default_factory=IterationStats)

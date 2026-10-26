@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+skills/
+.DS_Store
+
+# Saved order-judge decisions (runtime data)
+/data/
+/certs/
+
+# Image tarballs from scripts/build_image_tgz.sh
+/dist/

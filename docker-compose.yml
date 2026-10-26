@@ -1,0 +1,25 @@
+services:
+  evaluation-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      ssh:
+        - default
+    ports:
+      - "5002:5002"
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Saved order-judge decisions survive rebuilds
+      - ./data:/app/data
+      # Client certificates for the agent's Trino (AGENT_TRINO_CERT_PATH)
+      - ${AGENT_TRINO_CERTS_DIR:-./certs}:/app/certs:ro
+    restart: unless-stopped
+    networks:
+      - default
+      - shared-net
+networks:
+  shared-net:
+    external: true

@@ -23,6 +23,7 @@ import datetime as dt
 import math
 import re
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -635,6 +636,54 @@ def dynamically_wrap_with_yaml_cte(
     if shift_days == 0:
         return sql_query
 
+    def shift(col_sql: str, dtype: str) -> str | None:
+        if not _is_temporal_type(dtype):
+            return None
+        return _generate_shift_expression(col_sql, dtype, shift_days, dialect)
+
+    return _wrap_tables_with_ctes(
+        sql_query, table_schema_map, dialect, "__shifted", shift, shift_days=shift_days
+    )
+
+
+def _is_money_type(db_type: str) -> bool:
+    return (db_type or "").strip().lower() == "money"
+
+
+def cast_money_to_numeric(
+    sql_query: str,
+    table_schema_map: dict[str, dict[str, str]],
+    dialect: str | None = "postgres",
+) -> str:
+    """
+    Re-read every referenced table with its money columns cast to NUMERIC.
+
+    Postgres money can't be averaged, compared with numbers or divided like
+    one (avg(money), money = integer…), so golden SQL written as if amounts
+    were numbers fails. Same CTE technique as the time shift; returns the SQL
+    unchanged when no referenced table has a money column.
+    """
+
+    def to_numeric(col_sql: str, dtype: str) -> str | None:
+        return f"CAST({col_sql} AS NUMERIC)" if _is_money_type(dtype) else None
+
+    return _wrap_tables_with_ctes(sql_query, table_schema_map, dialect, "__numeric", to_numeric)
+
+
+def _wrap_tables_with_ctes(
+    sql_query: str,
+    table_schema_map: dict[str, dict[str, str]],
+    dialect: str | None,
+    cte_prefix: str,
+    rewrite_column: Callable[[str, str], str | None],
+    **log_fields: Any,
+) -> str:
+    """
+    Replace each referenced table that has a column rewrite_column changes
+    by a CTE re-selecting all its columns (rewritten ones replaced), keeping
+    the table's alias. rewrite_column(col_sql, db_type) returns the new
+    expression, or None to keep the column as is.
+    """
     try:
         parsed = sqlglot.parse_one(sql_query, read=dialect)
     except Exception as exc:
@@ -644,16 +693,11 @@ def dynamically_wrap_with_yaml_cte(
         return sql_query
 
     query_cte_names = {cte.alias_or_name.lower() for cte in parsed.find_all(exp.CTE)}
-    shifted_ctes: dict[str, exp.CTE] = {}
+    wrapped_ctes: dict[str, exp.CTE | None] = {}
 
     for table_node in list(parsed.find_all(exp.Table)):
         table_name = table_node.name.lower()
         if not table_name or (not table_node.db and table_name in query_cte_names):
-            continue
-
-        schema_dict = _lookup_table_schema(table_node, table_schema_map)
-        temporal_cols = {c for c, t in schema_dict.items() if _is_temporal_type(t)}
-        if not temporal_cols:
             continue
 
         full_table_name = exp.table_(
@@ -661,18 +705,24 @@ def dynamically_wrap_with_yaml_cte(
         ).sql(dialect=dialect)
         cte_key = full_table_name.lower()
 
-        if cte_key not in shifted_ctes:
-            cte_name = f"__shifted_{table_name}_{len(shifted_ctes) + 1}"
+        if cte_key not in wrapped_ctes:
+            wrapped_ctes[cte_key] = None
+            schema_dict = _lookup_table_schema(table_node, table_schema_map)
             select_parts = []
+            rewritten = False
             for col, dtype in schema_dict.items():
                 # Postgres folds unquoted names to lower case
                 quote = dialect in ("postgres", "redshift") and not col.islower()
                 col_sql = exp.to_identifier(col, quoted=quote or None).sql(dialect=dialect)
-                if col in temporal_cols:
-                    shift_expr = _generate_shift_expression(col_sql, dtype, shift_days, dialect)
-                    select_parts.append(f"{shift_expr} AS {col_sql}")
-                else:
+                new_expr = rewrite_column(col_sql, dtype)
+                if new_expr is None:
                     select_parts.append(col_sql)
+                else:
+                    select_parts.append(f"{new_expr} AS {col_sql}")
+                    rewritten = True
+            if not rewritten:
+                continue
+            cte_name = f"{cte_prefix}_{table_name}_{sum(1 for c in wrapped_ctes.values() if c) + 1}"
             cte_query_str = f"SELECT {', '.join(select_parts)} FROM {full_table_name}"
             try:
                 cte_query_ast = sqlglot.parse_one(cte_query_str, read=dialect)
@@ -681,24 +731,26 @@ def dynamically_wrap_with_yaml_cte(
                     "sql_comparison_utils.cte_parse_failed", table=table_name, error=str(exc)
                 )
                 continue
-            shifted_ctes[cte_key] = exp.CTE(
+            wrapped_ctes[cte_key] = exp.CTE(
                 this=cte_query_ast, alias=exp.TableAlias(this=exp.to_identifier(cte_name))
             )
 
-        cte_name = shifted_ctes[cte_key].alias
+        cte = wrapped_ctes[cte_key]
+        if cte is None:
+            continue
         alias = table_node.alias or table_node.name
         table_node.replace(
             exp.Table(
-                this=exp.to_identifier(cte_name),
+                this=exp.to_identifier(cte.alias),
                 alias=exp.TableAlias(this=exp.to_identifier(alias)),
             )
         )
 
-    if not shifted_ctes:
+    new_ctes = [cte for cte in wrapped_ctes.values() if cte is not None]
+    if not new_ctes:
         return sql_query
 
     existing_with = node_arg(parsed, "with")
-    new_ctes = list(shifted_ctes.values())
     if existing_with is not None:
         existing_with.set("expressions", new_ctes + list(existing_with.expressions))
     else:
@@ -707,8 +759,9 @@ def dynamically_wrap_with_yaml_cte(
 
     logger.debug(
         "sql_comparison_utils.cte_wrapped",
-        tables_wrapped=list(shifted_ctes),
-        shift_days=shift_days,
+        tables_wrapped=[k for k, c in wrapped_ctes.items() if c is not None],
+        cte_prefix=cte_prefix,
+        **log_fields,
     )
     return parsed.sql(dialect=dialect)
 
@@ -812,6 +865,14 @@ async def compare_with_order_policy(
     return score, details
 
 
+def has_no_data(result: Any) -> bool:
+    """No rows, or only NULLs (e.g. SUM over no rows): nothing to compare."""
+    if result is None or getattr(result, "truncated", False):
+        return False
+    rows = result.rows or []
+    return all(cell is None for row in rows for cell in row)
+
+
 async def evaluate_execution_match(
     context: Any,
     evaluator_name: str,
@@ -824,8 +885,9 @@ async def evaluate_execution_match(
     Score context.generated_result against context.expected_result.
 
     Not applicable (excluded from averages) when the golden SQL is missing or
-    fails to execute, or when both results were truncated by the executor —
-    those say nothing about the agent.
+    fails to execute, when its result has no data (an empty answer matches
+    anything that also finds nothing), or when both results were truncated
+    by the executor — those say nothing about the agent.
     """
     from src.domain.entities.evaluation_result import EvaluationResult
 
@@ -837,6 +899,8 @@ async def evaluate_execution_match(
             "expected_sql_execution_failed",
             error=getattr(context.expected_result, "error", None),
         )
+    if has_no_data(context.expected_result):
+        return EvaluationResult.not_applicable(evaluator_name, "golden_result_has_no_data")
     if not context.generated_sql and context.generated_result is None:
         return EvaluationResult(
             evaluator_name=evaluator_name,

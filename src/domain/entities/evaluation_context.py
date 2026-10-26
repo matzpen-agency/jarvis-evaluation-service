@@ -42,6 +42,10 @@ class EvaluationContext:
     # table → {column: db_type}, keyed by "table", "schema.table" (lower-case)
     schema_map: dict[str, dict[str, str]] = field(default_factory=dict)
 
+    # The form of expected_sql that was actually executed (it differs when it
+    # had to be rewritten to run, e.g. money columns cast to numeric)
+    executed_expected_sql: str | None = None
+
     # ── Agent output ──────────────────────────────────────────────────────────
     agent_response: AgentResponse | None = None
     generated_sql: str | None = None

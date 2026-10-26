@@ -27,7 +27,10 @@ from src.domain.entities.dataset_run import DatasetRun
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
 from src.domain.entities.query_result import QueryResult
-from src.domain.evaluators.sql_comparison_utils import transpile_sql
+from src.domain.evaluators.sql_comparison_utils import (
+    cast_money_to_numeric,
+    transpile_sql,
+)
 from src.domain.services.deadline import run_with_deadline
 from src.domain.services.evaluation_engine import EvaluationEngine
 from src.domain.services.metrics_aggregator import MetricsAggregator, SampleRecord
@@ -413,9 +416,30 @@ class EvaluationRunner:
         return await self._engine.run_all(context)
 
     async def _execute_expected(self, context: EvaluationContext) -> None:
-        context.expected_result = await self._safe_execute(
-            context.expected_sql, context.connection_id
-        )
+        """
+        Run the golden SQL on the connection. Golden SQL that treats Postgres
+        money as a number (avg(money), money = integer…) is rejected by the
+        database; retry it once with money columns cast to numeric.
+        """
+        sql = context.expected_sql
+        result = await self._safe_execute(sql, context.connection_id)
+        context.executed_expected_sql = sql
+        context.expected_result = result
+        if result.success or "money" not in (result.error or "").lower():
+            return
+
+        rewritten = cast_money_to_numeric(sql, context.schema_map, context.dialect or "postgres")
+        if rewritten == sql:
+            return
+        retry = await self._safe_execute(rewritten, context.connection_id)
+        context.metadata["expected_sql_raw_error"] = result.error
+        if retry.success:
+            context.executed_expected_sql = rewritten
+            context.expected_result = retry
+            context.metadata["expected_sql_money_cast"] = True
+            logger.info(
+                "evaluation_runner.expected_sql_money_cast", item_id=context.dataset_item.id
+            )
 
     async def _execute_generated(self, context: EvaluationContext) -> None:
         """
@@ -464,7 +488,9 @@ class EvaluationRunner:
             return
         generated_sql = context.executed_generated_sql or context.generated_sql or ""
         exp_total, gen_total = await asyncio.gather(
-            self._count_rows(context.expected_sql, context.connection_id),
+            self._count_rows(
+                context.executed_expected_sql or context.expected_sql, context.connection_id
+            ),
             self._count_rows(
                 generated_sql,
                 context.connection_id,

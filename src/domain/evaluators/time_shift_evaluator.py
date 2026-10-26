@@ -33,6 +33,7 @@ from src.domain.evaluators.sql_comparison_utils import (
     compare_results,
     compare_with_order_policy,
     dynamically_wrap_with_yaml_cte,
+    has_no_data,
 )
 from src.domain.services.deadline import run_with_deadline
 from src.ports.order_judge import OrderJudge
@@ -91,7 +92,11 @@ class TimeShiftEvaluator(BaseEvaluator):
                 self.name, "expected_sql_execution_failed"
             )
 
+        if has_no_data(context.expected_result):
+            return EvaluationResult.not_applicable(self.name, "golden_result_has_no_data")
+
         schema_map = await self._schema_map(context)
+        expected_sql = context.executed_expected_sql or context.expected_sql
         generated_sql = context.executed_generated_sql or context.generated_sql
         dialect = context.dialect or "trino"
         # Generated SQL on the agent's engine stays in the agent's dialect
@@ -100,7 +105,7 @@ class TimeShiftEvaluator(BaseEvaluator):
         shifted_pairs = []
         for offset in self._offsets:
             expected_shifted = dynamically_wrap_with_yaml_cte(
-                context.expected_sql, offset, schema_map, dialect
+                expected_sql, offset, schema_map, dialect
             )
             generated_shifted = dynamically_wrap_with_yaml_cte(
                 generated_sql, offset, schema_map, generated_dialect
@@ -108,7 +113,7 @@ class TimeShiftEvaluator(BaseEvaluator):
             shifted_pairs.append((offset, expected_shifted, generated_shifted))
 
         if all(
-            exp_sql == context.expected_sql and gen_sql == generated_sql
+            exp_sql == expected_sql and gen_sql == generated_sql
             for _, exp_sql, gen_sql in shifted_pairs
         ):
             return EvaluationResult.not_applicable(

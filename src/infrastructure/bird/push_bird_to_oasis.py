@@ -47,6 +47,7 @@ from typing import Any
 
 import httpx
 
+from src.domain.evaluators.sql_comparison_utils import clean_name
 from src.infrastructure.bird.load_bird_databases import (
     DATABASES_DIR,
     _batches,
@@ -112,7 +113,7 @@ class SourcePlan:
 
     @property
     def english_name(self) -> str:
-        return f"{avro_name(self.db_id)}__{avro_name(self.table)}"
+        return dataverse_table(self.db_id, self.table)
 
     @property
     def trino_table(self) -> str:
@@ -133,10 +134,9 @@ class SourcePlan:
 # ── Names ─────────────────────────────────────────────────────────────────────
 
 
-def avro_name(name: str) -> str:
-    """A valid Avro name: lower-case letters, digits and "_", not starting with a digit."""
-    cleaned = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "column"
-    return f"_{cleaned}" if cleaned[0].isdigit() else cleaned
+def dataverse_table(db_id: str, table: str) -> str:
+    """The source's English name, which dataverse uses as its table name."""
+    return f"{clean_name(db_id)}__{clean_name(table)}"
 
 
 def field_names(columns: list[str]) -> dict[str, str]:
@@ -144,9 +144,9 @@ def field_names(columns: list[str]) -> dict[str, str]:
     fields: dict[str, str] = {}
     used: set[str] = set()
     for column in columns:
-        field, n = avro_name(column), 2
+        field, n = clean_name(column), 2
         while field in used:
-            field, n = f"{avro_name(column)}_{n}", n + 1
+            field, n = f"{clean_name(column)}_{n}", n + 1
         used.add(field)
         fields[column] = field
     return fields

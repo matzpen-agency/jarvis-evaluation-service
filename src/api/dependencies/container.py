@@ -103,6 +103,7 @@ def _get_benchmark_provider() -> BenchmarkProvider:
             include_evidence=settings.BIRD_INCLUDE_EVIDENCE,
             databases_dir=_project_path(settings.BIRD_DATABASES_DIR),
             schema_prefix=settings.BIRD_SCHEMA_PREFIX,
+            dataverse_schema=settings.BIRD_DATAVERSE_SCHEMA,
         )
     )
 

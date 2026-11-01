@@ -145,6 +145,10 @@ class Settings(BaseSettings):
     # into a connection's database, one schema "<prefix><db_id>" each
     BIRD_DATABASES_DIR: str = "src/config/bird/databases"
     BIRD_SCHEMA_PREFIX: str = "bird_"
+    # Set when every BIRD database was pushed to dataverse with
+    # push_bird_to_oasis (e.g. "agency__bird-public-benchmark"): gold SQL then
+    # reads "<schema>".<db_id>__<table> with cleaned column names
+    BIRD_DATAVERSE_SCHEMA: str = ""
 
     # Numeric tolerance for result comparison (decimal places)
     NUMERIC_COMPARISON_TOLERANCE: int = 6

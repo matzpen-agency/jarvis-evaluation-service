@@ -18,6 +18,13 @@ loaded into a connection's database by load_bird_databases.py as schemas
 "bird_<db_id>". Their questions carry that schema ("sql_schema") and are
 limited to those verify_bird_questions.py found to keep their answer on
 Trino and Postgres. "bird-all" is every bundled database's questions.
+
+With a dataverse schema (BIRD_DATAVERSE_SCHEMA), every BIRD database was
+pushed to dataverse by push_bird_to_oasis.py instead: all of them are
+available, "bird-all" holds every question, and the gold SQL uses the
+dataverse names, "<schema>".<db_id>__<table> with cleaned column names.
+Questions verify_bird_questions.py checked there are limited to those that
+keep their answer.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ from pathlib import Path
 import structlog
 
 from src.domain.entities.dataset_item import DatasetItem
+from src.domain.evaluators.sql_comparison_utils import clean_name
 
 logger = structlog.get_logger(__name__)
 
@@ -37,6 +45,8 @@ BIRD_DATASET_PREFIX = "bird-"
 BIRD_ALL_BUNDLED = "all"
 BIRD_SQL_DIALECT = "sqlite"
 VERIFIED_QUESTIONS_FILE = "verified_questions.json"
+# Key in VERIFIED_QUESTIONS_FILE for questions checked on dataverse
+DATAVERSE_ENGINE = "dataverse"
 
 
 def bird_db_id_for_connection(connection_name: str | None) -> str | None:
@@ -60,17 +70,25 @@ class BirdDatasetLoader:
         include_evidence: bool = True,
         databases_dir: str | None = None,
         schema_prefix: str = "bird_",
+        dataverse_schema: str = "",
     ) -> None:
         self._path = path
         self._include_evidence = include_evidence
         self._databases_dir = Path(databases_dir) if databases_dir else None
         self._schema_prefix = schema_prefix
+        self._dataverse_schema = dataverse_schema
 
     def db_ids(self) -> list[str]:
         return sorted({row["db_id"] for row in self._rows})
 
     def bundled_db_ids(self) -> list[str]:
-        """Databases shipped with the service, ready for load_bird_databases.py."""
+        """
+        Databases loaded where evaluations can query them: every one when they
+        were pushed to dataverse, else those shipped with the service, ready
+        for load_bird_databases.py.
+        """
+        if self._dataverse_schema:
+            return self.db_ids()
         if self._databases_dir is None:
             return []
         return sorted(p.stem for p in self._databases_dir.glob("*.sqlite"))
@@ -86,8 +104,15 @@ class BirdDatasetLoader:
         verified = self._verified.get(db_id)
         if verified is not None:
             rows = [row for row in rows if row["question_id"] in verified]
-        schema = f"{self._schema_prefix}{db_id}".lower()
-        return [self._to_item(row, schema) for row in rows]
+        if self._dataverse_schema:
+            naming = {
+                "sql_schema": self._dataverse_schema,
+                "sql_table_prefix": f"{clean_name(db_id)}__",
+                "sql_clean_names": True,
+            }
+        else:
+            naming = {"sql_schema": f"{self._schema_prefix}{db_id}".lower()}
+        return [self._to_item(row, naming) for row in rows]
 
     def load_bundled(self) -> list[DatasetItem]:
         return [item for db_id in self.bundled_db_ids() for item in self.load(db_id)]
@@ -108,20 +133,27 @@ class BirdDatasetLoader:
 
     @cached_property
     def _verified(self) -> dict[str, set[int]]:
-        """Per bundled database, the questions verified on every engine checked."""
+        """
+        Per database, the questions verified on every engine checked — only
+        on dataverse when the databases are there.
+        """
         if self._databases_dir is None:
             return {}
         path = self._databases_dir / VERIFIED_QUESTIONS_FILE
         if not path.exists():
             return {}
         per_engine: dict[str, dict[str, list[int]]] = json.loads(path.read_text())
+        if self._dataverse_schema:
+            per_engine = {DATAVERSE_ENGINE: per_engine.get(DATAVERSE_ENGINE, {})}
+        else:
+            per_engine.pop(DATAVERSE_ENGINE, None)
         verified: dict[str, set[int]] = {}
         for by_db in per_engine.values():
             for db_id, ids in by_db.items():
                 verified[db_id] = verified.get(db_id, set(ids)) & set(ids)
         return verified
 
-    def _to_item(self, row: dict, schema: str | None = None) -> DatasetItem:
+    def _to_item(self, row: dict, naming: dict | None = None) -> DatasetItem:
         question = (row.get("question") or "").strip()
         evidence = (row.get("evidence") or "").strip()
         query = question
@@ -140,6 +172,6 @@ class BirdDatasetLoader:
                 "grading_method": (row.get("grading_method") or "").strip(),
                 "evidence": evidence,
                 "sql_dialect": BIRD_SQL_DIALECT,
-                **({"sql_schema": schema} if schema else {}),
+                **(naming or {}),
             },
         )

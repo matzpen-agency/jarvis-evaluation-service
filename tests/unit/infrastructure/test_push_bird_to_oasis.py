@@ -43,8 +43,8 @@ class FakeOasis:
 
 
 def test_names_are_valid_for_avro_and_oasis():
-    assert oasis.avro_name("Total ($)") == "total"
-    assert oasis.avro_name("2019 Count") == "_2019_count"
+    assert oasis.clean_name("Total ($)") == "total"
+    assert oasis.clean_name("2019 Count") == "_2019_count"
     assert oasis.field_names(["a b", "a_b"]) == {"a b": "a_b", "a_b": "a_b_2"}
     assert oasis.hebrew_words("car_retails") == "קאר רטאילס"
     assert oasis.hebrew_number(2) == "ב'"

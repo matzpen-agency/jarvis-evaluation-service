@@ -132,12 +132,29 @@ def transpile_sql(sql: str, read: str | None, write: str | None) -> str | None:
         return None
 
 
-def adapt_sqlite_benchmark_sql(sql: str, schema: str, write: str | None) -> str | None:
+def clean_name(name: str) -> str:
+    """
+    A name as dataverse gets it from an Oasis source (Avro names): lower-case,
+    anything but letters and digits becomes "_", never starting with a digit.
+    """
+    cleaned = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "column"
+    return f"_{cleaned}" if cleaned[0].isdigit() else cleaned
+
+
+def adapt_sqlite_benchmark_sql(
+    sql: str,
+    schema: str,
+    write: str | None,
+    table_prefix: str = "",
+    clean_names: bool = False,
+) -> str | None:
     """
     Translate SQLite benchmark gold SQL (BIRD) for its database loaded into
     `schema` with lower-case names: LIKE becomes case-insensitive as in SQLite,
     identifiers are lower-cased (SQLite matches names case-insensitively even
-    when quoted) and tables are put in the schema. None if it can't parse.
+    when quoted) and tables are put in the schema. For a database pushed to
+    dataverse through Oasis, `clean_names` cleans every name as clean_name
+    does and tables are named "<table_prefix><table>". None if it can't parse.
     """
     try:
         parsed = sqlglot.parse_one(sql, read="sqlite")
@@ -148,18 +165,23 @@ def adapt_sqlite_benchmark_sql(sql: str, schema: str, write: str | None) -> str 
     for like in list(parsed.find_all(exp.Like)):
         like.replace(exp.ILike(this=like.this, expression=like.expression))
     for identifier in parsed.find_all(exp.Identifier):
-        identifier.set("this", identifier.name.lower())
+        name = identifier.name.lower()
+        identifier.set("this", clean_name(name) if clean_names else name)
     try:
-        return qualify_tables(parsed.sql(dialect=write), schema, write)
+        return qualify_tables(parsed.sql(dialect=write), schema, write, table_prefix)
     except Exception:
         return None
 
 
-def qualify_tables(sql: str, schema: str, dialect: str | None) -> str:
+def qualify_tables(
+    sql: str, schema: str, dialect: str | None, table_prefix: str = ""
+) -> str:
     """
     Put every table that names no schema in `schema` (CTE names are left
     alone), e.g. for gold SQL written for a database that lives in one schema
-    of the connection. Returns the SQL unchanged if it can't parse.
+    of the connection. With `table_prefix`, the table is also renamed to
+    "<table_prefix><table>" and keeps its old name as alias, so columns
+    qualified by it still resolve. Returns the SQL unchanged if it can't parse.
     """
     try:
         parsed = sqlglot.parse_one(sql, read=dialect)
@@ -172,6 +194,10 @@ def qualify_tables(sql: str, schema: str, dialect: str | None) -> str:
         if table.args.get("db") or not table.name or table.name.lower() in cte_names:
             continue
         table.set("db", exp.to_identifier(schema))
+        if table_prefix:
+            if not table.alias:
+                table.set("alias", exp.TableAlias(this=exp.to_identifier(table.name)))
+            table.set("this", exp.to_identifier(f"{table_prefix}{table.name}"))
     try:
         return parsed.sql(dialect=dialect)
     except Exception:

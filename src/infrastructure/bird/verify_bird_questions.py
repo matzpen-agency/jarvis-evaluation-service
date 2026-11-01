@@ -13,6 +13,13 @@ SQL that breaks in translation never counts against the agent.
 
     python -m src.infrastructure.bird.verify_bird_questions --catalog minio [--write]
     python -m src.infrastructure.bird.verify_bird_questions --target postgres --dsn ...
+
+For databases pushed to dataverse with push_bird_to_oasis.py, point it at the
+SQLite files and the pool's schema; the matches are saved as engine
+"dataverse", which the BIRD dataset uses when BIRD_DATAVERSE_SCHEMA is set:
+
+    python -m src.infrastructure.bird.verify_bird_questions --catalog dataverse \
+        --dataverse-schema agency__bird-public-benchmark --databases-dir /data/bird --write
 """
 
 from __future__ import annotations
@@ -26,11 +33,15 @@ from pathlib import Path
 from src.domain.entities.query_result import QueryResult
 from src.domain.evaluators.sql_comparison_utils import (
     adapt_sqlite_benchmark_sql,
+    clean_name,
     compare_results,
     parse_grading_method,
     transpile_sql,
 )
-from src.infrastructure.bird.bird_dataset_loader import VERIFIED_QUESTIONS_FILE
+from src.infrastructure.bird.bird_dataset_loader import (
+    DATAVERSE_ENGINE,
+    VERIFIED_QUESTIONS_FILE,
+)
 from src.infrastructure.bird.load_bird_databases import (
     DATABASES_DIR,
     DEFAULT_SCHEMA_PREFIX,
@@ -44,9 +55,17 @@ QUESTIONS_PATH = DATABASES_DIR.parent / "bird_verified_cot_2462.jsonl"
 VERIFIED_PATH = DATABASES_DIR / VERIFIED_QUESTIONS_FILE
 
 
-def gold_sql_for(sql: str, schema: str, target: str) -> str | None:
-    """The gold SQL as the evaluation runs it on a Postgres connection / the agent's Trino."""
-    adapted = adapt_sqlite_benchmark_sql(sql, schema, "postgres")
+def gold_sql_for(
+    sql: str, schema: str, target: str, db_id: str | None = None
+) -> str | None:
+    """
+    The gold SQL as the evaluation runs it on a Postgres connection / the
+    agent's Trino; with db_id, on the database pushed to dataverse in `schema`.
+    """
+    naming = (
+        {"table_prefix": f"{clean_name(db_id)}__", "clean_names": True} if db_id else {}
+    )
+    adapted = adapt_sqlite_benchmark_sql(sql, schema, "postgres", **naming)
     if adapted is None or target == "postgres":
         return adapted
     return transpile_sql(adapted, read="postgres", write="trino")
@@ -62,19 +81,26 @@ def _result(rows: list) -> QueryResult:
 
 
 def verify(
-    run_query, target: str, databases: list[str], prefix: str
+    run_query,
+    target: str,
+    databases: list[str],
+    prefix: str,
+    databases_dir: Path = DATABASES_DIR,
+    dataverse_schema: str = "",
 ) -> dict[str, list[int]]:
     questions = [json.loads(line) for line in QUESTIONS_PATH.open(encoding="utf-8")]
     verified: dict[str, list[int]] = {}
     for db_id in databases:
         lite = sqlite3.connect(
-            f"file:{DATABASES_DIR / (db_id + '.sqlite')}?mode=ro", uri=True
+            f"file:{databases_dir / (db_id + '.sqlite')}?mode=ro", uri=True
         )
-        schema = schema_name(db_id, prefix)
+        schema = dataverse_schema or schema_name(db_id, prefix)
         ok, failures = [], []
         for q in (q for q in questions if q["db_id"] == db_id):
             expected = _result(lite.execute(q["SQL"]).fetchall())
-            sql = gold_sql_for(q["SQL"], schema, target)
+            sql = gold_sql_for(
+                q["SQL"], schema, target, db_id if dataverse_schema else None
+            )
             try:
                 actual = _result(run_query(sql)) if sql else None
             except Exception as exc:
@@ -111,13 +137,21 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--catalog", help="Trino catalog holding the BIRD schemas")
     parser.add_argument("--dsn", help="Postgres connection string")
     parser.add_argument("--schema-prefix", default=DEFAULT_SCHEMA_PREFIX)
+    parser.add_argument("--databases-dir", type=Path, default=DATABASES_DIR)
+    parser.add_argument(
+        "--dataverse-schema",
+        default="",
+        help="the databases were pushed to dataverse in this schema (push_bird_to_oasis)",
+    )
     parser.add_argument(
         "--write",
         action="store_true",
         help=f"save the matching questions to {VERIFIED_PATH}",
     )
     args = parser.parse_args(argv)
-    databases = args.databases or available_databases()
+    databases = args.databases or available_databases(args.databases_dir)
+    if args.dataverse_schema and args.target != "trino":
+        parser.error("--dataverse-schema needs --target trino")
 
     if args.target == "trino":
         if not args.catalog:
@@ -140,12 +174,20 @@ def main(argv: list[str] | None = None) -> None:
                 cur.execute(sql)
                 return cur.fetchall()
 
-    verified = verify(run_query, args.target, databases, args.schema_prefix)
+    verified = verify(
+        run_query,
+        args.target,
+        databases,
+        args.schema_prefix,
+        args.databases_dir,
+        args.dataverse_schema,
+    )
     if args.write:
         existing = (
             json.loads(VERIFIED_PATH.read_text()) if VERIFIED_PATH.exists() else {}
         )
-        existing.setdefault(args.target, {}).update(verified)
+        engine = DATAVERSE_ENGINE if args.dataverse_schema else args.target
+        existing.setdefault(engine, {}).update(verified)
         VERIFIED_PATH.write_text(json.dumps(existing, indent=2, sort_keys=True) + "\n")
         _say(f"Saved to {Path(VERIFIED_PATH)}")
     if not any(verified.values()):

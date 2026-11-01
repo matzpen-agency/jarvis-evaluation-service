@@ -331,14 +331,20 @@ class EvaluationRunner:
         Benchmark gold SQL is written for its own engine (BIRD: SQLite);
         transpile it to the connection's dialect before it is executed. A
         benchmark database loaded into one schema of the connection
-        ("sql_schema") also gets SQLite's case-insensitive names and LIKE.
+        ("sql_schema") also gets SQLite's case-insensitive names and LIKE,
+        and, when pushed to dataverse, its tables' and columns' dataverse names
+        ("sql_table_prefix", "sql_clean_names").
         """
         metadata = context.dataset_item.metadata or {}
         source_dialect = metadata.get("sql_dialect")
         schema = metadata.get("sql_schema")
         if schema and source_dialect == "sqlite":
             transpiled = adapt_sqlite_benchmark_sql(
-                context.expected_sql, schema, context.dialect or "postgres"
+                context.expected_sql,
+                schema,
+                context.dialect or "postgres",
+                table_prefix=metadata.get("sql_table_prefix", ""),
+                clean_names=bool(metadata.get("sql_clean_names")),
             )
         elif not source_dialect or not context.dialect or source_dialect == context.dialect:
             return

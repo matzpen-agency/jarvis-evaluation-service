@@ -356,6 +356,7 @@ def get_run_dataset_use_case(
         agent_dialect=settings.AGENT_SQL_DIALECT,
         numeric_tolerance=settings.NUMERIC_COMPARISON_TOLERANCE,
         agent_executor=_get_agent_executor(),
+        expected_on_agent_engine=settings.EXPECTED_SQL_ON_AGENT_ENGINE,
     )
 
     return RunDatasetEvaluationUseCase(
@@ -399,6 +400,7 @@ def get_run_mcp_dataset_use_case(
         agent_dialect=settings.AGENT_SQL_DIALECT,
         numeric_tolerance=settings.NUMERIC_COMPARISON_TOLERANCE,
         agent_executor=_get_agent_executor(),
+        expected_on_agent_engine=settings.EXPECTED_SQL_ON_AGENT_ENGINE,
     )
 
     return RunMcpDatasetEvaluationUseCase(

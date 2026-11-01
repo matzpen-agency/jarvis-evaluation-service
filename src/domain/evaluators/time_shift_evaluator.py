@@ -102,13 +102,14 @@ class TimeShiftEvaluator(BaseEvaluator):
         expected_sql = context.executed_expected_sql or context.expected_sql
         generated_sql = context.executed_generated_sql or context.generated_sql
         dialect = context.dialect or "trino"
-        # Generated SQL on the agent's engine stays in the agent's dialect
+        # SQL run on the agent's engine stays in the agent's dialect
+        expected_dialect = context.agent_dialect if context.expected_on_agent_engine else dialect
         generated_dialect = context.agent_dialect if context.generated_on_agent_engine else dialect
 
         shifted_pairs = []
         for offset in self._offsets:
             expected_shifted = dynamically_wrap_with_yaml_cte(
-                expected_sql, offset, schema_map, dialect
+                expected_sql, offset, schema_map, expected_dialect
             )
             generated_shifted = dynamically_wrap_with_yaml_cte(
                 generated_sql, offset, schema_map, generated_dialect
@@ -188,6 +189,11 @@ class TimeShiftEvaluator(BaseEvaluator):
             logger.warning("time_shift_evaluator.schema_map_failed", error=str(exc))
             return {}
 
+    def _expected_executor(self, context: EvaluationContext) -> QueryExecutor:
+        if context.expected_on_agent_engine and self._agent_executor is not None:
+            return self._agent_executor
+        return self._executor
+
     def _generated_executor(self, context: EvaluationContext) -> QueryExecutor:
         if context.generated_on_agent_engine and self._agent_executor is not None:
             return self._agent_executor
@@ -204,7 +210,9 @@ class TimeShiftEvaluator(BaseEvaluator):
         try:
             expected_result, generated_result = await run_with_deadline(
                 asyncio.gather(
-                    self._executor.execute(expected_sql, connection_id=context.connection_id),
+                    self._expected_executor(context).execute(
+                        expected_sql, connection_id=context.connection_id
+                    ),
                     self._generated_executor(context).execute(
                         generated_sql, connection_id=context.connection_id
                     ),

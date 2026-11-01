@@ -2,7 +2,9 @@
 test_agent_engine_routing.py — Generated SQL runs where the agent ran it.
 
 For connections mapped to the agent's Trino, the agent's SQL runs there (in
-the agent's dialect) while the golden SQL keeps running on the connection.
+the agent's dialect), and so does the golden SQL (transpiled), so both
+results come from the same engine; the golden SQL falls back to the
+connection when it can't run there.
 """
 
 from __future__ import annotations
@@ -13,7 +15,10 @@ import pytest
 
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.query_result import QueryResult
-from src.domain.evaluators.sql_comparison_utils import compare_results
+from src.domain.evaluators.sql_comparison_utils import (
+    cast_money_to_numeric,
+    compare_results,
+)
 from src.domain.evaluators.time_shift_evaluator import TimeShiftEvaluator
 from src.domain.services.evaluation_engine import EvaluationEngine
 from src.domain.services.evaluation_runner import EvaluationRunner
@@ -37,7 +42,9 @@ class FakeAgentExecutor:
         return connection_id in self._covered
 
 
-def _runner(dataset_provider, agent_client, query_executor, reporter, agent_executor):
+def _runner(
+    dataset_provider, agent_client, query_executor, reporter, agent_executor, **kwargs
+):
     engine = AsyncMock(spec=EvaluationEngine)
     engine.run_all = AsyncMock(return_value=[])
     engine.evaluator_names = []
@@ -49,6 +56,7 @@ def _runner(dataset_provider, agent_client, query_executor, reporter, agent_exec
         evaluation_engine=engine,
         metrics_aggregator=MagicMock(),
         agent_executor=agent_executor,
+        **kwargs,
     ), engine
 
 
@@ -66,12 +74,115 @@ async def test_generated_sql_runs_on_the_agent_trino_for_mapped_connections(
 
     ctx = engine.run_all.call_args[0][0]
     assert ctx.generated_on_agent_engine is True
+    assert ctx.expected_on_agent_engine is True
+    executed = [c.args[0] for c in agent_executor.execute.call_args_list]
+    assert sorted(executed) == sorted([ctx.generated_sql, ctx.expected_sql])
+    mock_query_executor.execute.assert_not_called()
+    assert ctx.metadata["evaluation_config"]["generated_sql_engine"] == "agent_trino"
+    assert ctx.metadata["evaluation_config"]["expected_sql_engine"] == "agent_trino"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_golden_sql_stays_on_the_connection_when_switched_off(
+    mock_dataset_provider, mock_agent_client, mock_query_executor, mock_reporter
+):
+    agent_executor = FakeAgentExecutor({6})
+    runner, engine = _runner(
+        mock_dataset_provider,
+        mock_agent_client,
+        mock_query_executor,
+        mock_reporter,
+        agent_executor,
+        expected_on_agent_engine=False,
+    )
+
+    await runner.run(dataset_name="d", allowed_tables=[], agent_kwargs={"connection_id": 6})
+
+    ctx = engine.run_all.call_args[0][0]
+    assert ctx.expected_on_agent_engine is False
     agent_executor.execute.assert_called_once()
     assert agent_executor.execute.call_args.args[0] == ctx.generated_sql
-    # Golden SQL stays on the connection
     mock_query_executor.execute.assert_called_once()
     assert mock_query_executor.execute.call_args.args[0] == ctx.expected_sql
-    assert ctx.metadata["evaluation_config"]["generated_sql_engine"] == "agent_trino"
+    assert ctx.metadata["evaluation_config"]["expected_sql_engine"] == "connection"
+
+
+def _golden_context(sample_dataset_item, expected_sql, schema_map=None) -> EvaluationContext:
+    return EvaluationContext(
+        dataset_item=sample_dataset_item,
+        run_id="r",
+        query="q",
+        expected_sql=expected_sql,
+        allowed_tables=[],
+        connection_id=6,
+        dialect="postgres",
+        agent_dialect="trino",
+        schema_map=schema_map or {},
+        generated_on_agent_engine=True,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_golden_sql_is_transpiled_to_trino(sample_dataset_item, mock_query_executor):
+    agent_executor = FakeAgentExecutor({6})
+    runner, _ = _runner(MagicMock(), MagicMock(), mock_query_executor, MagicMock(), agent_executor)
+    ctx = _golden_context(
+        sample_dataset_item, "SELECT name FROM sales.store WHERE name ILIKE '%bike%'"
+    )
+
+    await runner._execute_expected(ctx)
+
+    sql = agent_executor.execute.call_args.args[0]
+    assert "ILIKE" not in sql.upper() and "LOWER(" in sql.upper()  # Trino has no ILIKE
+    assert ctx.executed_expected_sql == sql
+    assert ctx.expected_on_agent_engine is True
+    mock_query_executor.execute.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_golden_sql_reads_money_as_numbers_on_trino(sample_dataset_item, mock_query_executor):
+    agent_executor = FakeAgentExecutor({6})
+    runner, _ = _runner(MagicMock(), MagicMock(), mock_query_executor, MagicMock(), agent_executor)
+    ctx = _golden_context(
+        sample_dataset_item,
+        "SELECT max(totaldue) FROM sales.salesorderheader",
+        {"sales.salesorderheader": {"totaldue": "money", "orderdate": "timestamp"}},
+    )
+
+    await runner._execute_expected(ctx)
+
+    sql = agent_executor.execute.call_args.args[0]
+    assert "REPLACE(REPLACE(totaldue, '$', ''), ',', '') AS DECIMAL(19, 4)" in sql
+    assert ctx.metadata["expected_sql_money_cast"] is True
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_golden_sql_falls_back_to_the_connection(sample_dataset_item, mock_query_executor):
+    agent_executor = FakeAgentExecutor({6})
+    agent_executor.execute = AsyncMock(return_value=QueryResult.failure("Table not found"))
+    runner, _ = _runner(MagicMock(), MagicMock(), mock_query_executor, MagicMock(), agent_executor)
+    ctx = _golden_context(sample_dataset_item, "SELECT 1 FROM sales.store")
+
+    await runner._execute_expected(ctx)
+
+    assert ctx.expected_on_agent_engine is False
+    mock_query_executor.execute.assert_called_once()
+    assert mock_query_executor.execute.call_args.args[0] == ctx.expected_sql
+    assert ctx.metadata["expected_sql_agent_engine_error"] == "Table not found"
+
+
+@pytest.mark.unit
+def test_money_cast_keeps_postgres_numeric_cast():
+    sql = cast_money_to_numeric(
+        "SELECT avg(totaldue) FROM sales.salesorderheader",
+        {"sales.salesorderheader": {"totaldue": "money"}},
+        "postgres",
+    )
+    assert "CAST(totaldue AS DECIMAL)" in sql or "CAST(totaldue AS NUMERIC)" in sql
 
 
 @pytest.mark.unit
@@ -121,6 +232,38 @@ async def test_time_shift_runs_generated_sql_on_the_agent_trino_in_trino_dialect
     assert "__shifted_orders" in golden_sql and "__shifted_orders" in generated_sql
     assert "DATE_ADD('DAY', -7" in generated_sql  # Trino syntax
     assert golden_sql != generated_sql  # Postgres syntax for the golden side
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_time_shift_runs_both_on_the_agent_trino_when_the_golden_sql_ran_there(
+    sample_dataset_item,
+):
+    connection = AsyncMock()
+    agent = AsyncMock()
+    agent.execute = AsyncMock(return_value=_rows(10))
+    ctx = EvaluationContext(
+        dataset_item=sample_dataset_item,
+        run_id="r",
+        query="q",
+        expected_sql="SELECT order_date FROM orders",
+        allowed_tables=[],
+        connection_id=6,
+        dialect="postgres",
+        schema_map={"orders": {"order_date": "date"}},
+        generated_on_agent_engine=True,
+        expected_on_agent_engine=True,
+    )
+    ctx.generated_sql = "SELECT order_date FROM orders"
+
+    result = await TimeShiftEvaluator(
+        query_executor=connection, offsets_days=[-7], agent_executor=agent
+    ).evaluate(ctx)
+
+    assert result.score == 1.0
+    connection.execute.assert_not_called()
+    golden_sql, generated_sql = (c.args[0] for c in agent.execute.call_args_list)
+    assert "DATE_ADD('DAY', -7" in golden_sql and "DATE_ADD('DAY', -7" in generated_sql
 
 
 @pytest.mark.unit

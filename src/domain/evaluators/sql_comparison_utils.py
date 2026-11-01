@@ -660,12 +660,17 @@ def cast_money_to_numeric(
 
     Postgres money can't be averaged, compared with numbers or divided like
     one (avg(money), money = integer…), so golden SQL written as if amounts
-    were numbers fails. Same CTE technique as the time shift; returns the SQL
-    unchanged when no referenced table has a money column.
+    were numbers fails. Trino reads Postgres money as text ('$1,234.56'), so
+    there the symbols are stripped first. Same CTE technique as the time
+    shift; returns the SQL unchanged when no referenced table has a money column.
     """
 
     def to_numeric(col_sql: str, dtype: str) -> str | None:
-        return f"CAST({col_sql} AS NUMERIC)" if _is_money_type(dtype) else None
+        if not _is_money_type(dtype):
+            return None
+        if dialect == "trino":
+            return f"CAST(REPLACE(REPLACE({col_sql}, '$', ''), ',', '') AS DECIMAL(19, 4))"
+        return f"CAST({col_sql} AS NUMERIC)"
 
     return _wrap_tables_with_ctes(sql_query, table_schema_map, dialect, "__numeric", to_numeric)
 

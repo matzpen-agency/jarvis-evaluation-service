@@ -71,6 +71,7 @@ class EvaluationRunner:
         agent_dialect: str = "trino",
         numeric_tolerance: int = 6,
         agent_executor: AgentSqlExecutor | None = None,
+        expected_on_agent_engine: bool = True,
     ) -> None:
         self._dataset_provider = dataset_provider
         self._agent_client = agent_client
@@ -85,6 +86,7 @@ class EvaluationRunner:
         self._agent_dialect = agent_dialect
         self._numeric_tolerance = numeric_tolerance
         self._agent_executor = agent_executor
+        self._expected_on_agent_engine = expected_on_agent_engine
 
     async def run(
         self,
@@ -407,6 +409,9 @@ class EvaluationRunner:
         if coros:
             await asyncio.gather(*coros)
         await self._count_truncated_results(context)
+        context.metadata.setdefault("evaluation_config", {})["expected_sql_engine"] = (
+            "agent_trino" if context.expected_on_agent_engine else "connection"
+        )
 
         if context.generated_result and context.generated_result.success:
             context.metadata["total_execution_time_ms"] = context.generated_result.execution_time_ms
@@ -417,10 +422,19 @@ class EvaluationRunner:
 
     async def _execute_expected(self, context: EvaluationContext) -> None:
         """
-        Run the golden SQL on the connection. Golden SQL that treats Postgres
-        money as a number (avg(money), money = integer…) is rejected by the
+        Run the golden SQL where the agent's SQL runs, so both results come
+        from the same engine; when it can't run there, run it on the
+        connection. On the connection, golden SQL that treats Postgres money
+        as a number (avg(money), money = integer…) is rejected by the
         database; retry it once with money columns cast to numeric.
         """
+        if (
+            self._expected_on_agent_engine
+            and context.generated_on_agent_engine
+            and await self._execute_expected_on_agent_engine(context)
+        ):
+            return
+
         sql = context.expected_sql
         result = await self._safe_execute(sql, context.connection_id)
         context.executed_expected_sql = sql
@@ -440,6 +454,50 @@ class EvaluationRunner:
             logger.info(
                 "evaluation_runner.expected_sql_money_cast", item_id=context.dataset_item.id
             )
+
+    async def _execute_expected_on_agent_engine(self, context: EvaluationContext) -> bool:
+        """
+        Run the golden SQL on the agent's engine, transpiled from the
+        connection's dialect. Money columns are cast to numbers up front: that
+        engine reads them as text ('$1,234.56'), which golden SQL would sort,
+        compare or aggregate as strings. Returns False (reason in metadata)
+        when it can't run there.
+        """
+        sql = context.expected_sql or ""
+        if context.dialect and context.dialect != context.agent_dialect:
+            sql = transpile_sql(sql, read=context.dialect, write=context.agent_dialect) or ""
+        if not sql:
+            context.metadata["expected_sql_agent_engine_error"] = (
+                f"could not transpile the golden SQL from {context.dialect} to "
+                f"{context.agent_dialect}"
+            )
+            return False
+
+        candidates = [sql]
+        with_numeric_money = cast_money_to_numeric(sql, context.schema_map, context.agent_dialect)
+        if with_numeric_money != sql:
+            candidates.insert(0, with_numeric_money)
+
+        result = None
+        for candidate in candidates:
+            result = await self._safe_execute(
+                candidate, context.connection_id, self._agent_executor
+            )
+            if result.success:
+                context.executed_expected_sql = candidate
+                context.expected_result = result
+                context.expected_on_agent_engine = True
+                if candidate is with_numeric_money:
+                    context.metadata["expected_sql_money_cast"] = True
+                return True
+
+        context.metadata["expected_sql_agent_engine_error"] = result.error if result else None
+        logger.info(
+            "evaluation_runner.expected_sql_agent_engine_failed",
+            item_id=context.dataset_item.id,
+            error=result.error if result else None,
+        )
+        return False
 
     async def _execute_generated(self, context: EvaluationContext) -> None:
         """
@@ -489,7 +547,9 @@ class EvaluationRunner:
         generated_sql = context.executed_generated_sql or context.generated_sql or ""
         exp_total, gen_total = await asyncio.gather(
             self._count_rows(
-                context.executed_expected_sql or context.expected_sql, context.connection_id
+                context.executed_expected_sql or context.expected_sql,
+                context.connection_id,
+                self._agent_executor if context.expected_on_agent_engine else None,
             ),
             self._count_rows(
                 generated_sql,

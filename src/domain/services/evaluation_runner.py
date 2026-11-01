@@ -28,6 +28,7 @@ from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
 from src.domain.entities.query_result import QueryResult
 from src.domain.evaluators.sql_comparison_utils import (
+    adapt_sqlite_benchmark_sql,
     cast_money_to_numeric,
     transpile_sql,
 )
@@ -328,14 +329,23 @@ class EvaluationRunner:
     def _adapt_expected_sql(context: EvaluationContext) -> None:
         """
         Benchmark gold SQL is written for its own engine (BIRD: SQLite);
-        transpile it to the connection's dialect before it is executed.
+        transpile it to the connection's dialect before it is executed. A
+        benchmark database loaded into one schema of the connection
+        ("sql_schema") also gets SQLite's case-insensitive names and LIKE.
         """
-        source_dialect = (context.dataset_item.metadata or {}).get("sql_dialect")
-        if not source_dialect or not context.dialect or source_dialect == context.dialect:
+        metadata = context.dataset_item.metadata or {}
+        source_dialect = metadata.get("sql_dialect")
+        schema = metadata.get("sql_schema")
+        if schema and source_dialect == "sqlite":
+            transpiled = adapt_sqlite_benchmark_sql(
+                context.expected_sql, schema, context.dialect or "postgres"
+            )
+        elif not source_dialect or not context.dialect or source_dialect == context.dialect:
             return
-        transpiled = transpile_sql(
-            context.expected_sql, read=source_dialect, write=context.dialect
-        )
+        else:
+            transpiled = transpile_sql(
+                context.expected_sql, read=source_dialect, write=context.dialect
+            )
         if transpiled:
             context.metadata["original_expected_sql"] = context.expected_sql
             context.expected_sql = transpiled

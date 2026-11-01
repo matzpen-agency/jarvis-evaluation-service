@@ -12,6 +12,12 @@ so evaluations need no internet access.
 A question can only be evaluated on a data connection holding its database,
 so items are grouped by db_id; datasets are named "bird-<db_id>". The gold
 SQL is SQLite — the runner transpiles it to the connection's dialect.
+
+A few databases are bundled too (src/config/bird/databases/<db_id>.sqlite),
+loaded into a connection's database by load_bird_databases.py as schemas
+"bird_<db_id>". Their questions carry that schema ("sql_schema") and are
+limited to those verify_bird_questions.py found to keep their answer on
+Trino and Postgres. "bird-all" is every bundled database's questions.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from __future__ import annotations
 import json
 import re
 from functools import cached_property
+from pathlib import Path
 
 import structlog
 
@@ -27,7 +34,9 @@ from src.domain.entities.dataset_item import DatasetItem
 logger = structlog.get_logger(__name__)
 
 BIRD_DATASET_PREFIX = "bird-"
+BIRD_ALL_BUNDLED = "all"
 BIRD_SQL_DIALECT = "sqlite"
+VERIFIED_QUESTIONS_FILE = "verified_questions.json"
 
 
 def bird_db_id_for_connection(connection_name: str | None) -> str | None:
@@ -45,16 +54,43 @@ def bird_db_id_for_connection(connection_name: str | None) -> str | None:
 class BirdDatasetLoader:
     """Reads the bundled BIRD-Verified JSONL and builds DatasetItems."""
 
-    def __init__(self, path: str, include_evidence: bool = True) -> None:
+    def __init__(
+        self,
+        path: str,
+        include_evidence: bool = True,
+        databases_dir: str | None = None,
+        schema_prefix: str = "bird_",
+    ) -> None:
         self._path = path
         self._include_evidence = include_evidence
+        self._databases_dir = Path(databases_dir) if databases_dir else None
+        self._schema_prefix = schema_prefix
 
     def db_ids(self) -> list[str]:
         return sorted({row["db_id"] for row in self._rows})
 
+    def bundled_db_ids(self) -> list[str]:
+        """Databases shipped with the service, ready for load_bird_databases.py."""
+        if self._databases_dir is None:
+            return []
+        return sorted(p.stem for p in self._databases_dir.glob("*.sqlite"))
+
     def load(self, db_id: str) -> list[DatasetItem]:
-        """All questions for one BIRD database (empty if the db_id is unknown)."""
-        return [self._to_item(row) for row in self._rows if row["db_id"] == db_id]
+        """
+        Questions for one BIRD database (empty if the db_id is unknown); for a
+        bundled one, only its verified questions, in its schema.
+        """
+        rows = [row for row in self._rows if row["db_id"] == db_id]
+        if db_id not in self.bundled_db_ids():
+            return [self._to_item(row) for row in rows]
+        verified = self._verified.get(db_id)
+        if verified is not None:
+            rows = [row for row in rows if row["question_id"] in verified]
+        schema = f"{self._schema_prefix}{db_id}".lower()
+        return [self._to_item(row, schema) for row in rows]
+
+    def load_bundled(self) -> list[DatasetItem]:
+        return [item for db_id in self.bundled_db_ids() for item in self.load(db_id)]
 
     # ── Internals ─────────────────────────────────────────────────────────────
 
@@ -70,7 +106,22 @@ class BirdDatasetLoader:
         logger.info("bird_dataset_loader.loaded", path=self._path, questions=len(rows))
         return rows
 
-    def _to_item(self, row: dict) -> DatasetItem:
+    @cached_property
+    def _verified(self) -> dict[str, set[int]]:
+        """Per bundled database, the questions verified on every engine checked."""
+        if self._databases_dir is None:
+            return {}
+        path = self._databases_dir / VERIFIED_QUESTIONS_FILE
+        if not path.exists():
+            return {}
+        per_engine: dict[str, dict[str, list[int]]] = json.loads(path.read_text())
+        verified: dict[str, set[int]] = {}
+        for by_db in per_engine.values():
+            for db_id, ids in by_db.items():
+                verified[db_id] = verified.get(db_id, set(ids)) & set(ids)
+        return verified
+
+    def _to_item(self, row: dict, schema: str | None = None) -> DatasetItem:
         question = (row.get("question") or "").strip()
         evidence = (row.get("evidence") or "").strip()
         query = question
@@ -89,5 +140,6 @@ class BirdDatasetLoader:
                 "grading_method": (row.get("grading_method") or "").strip(),
                 "evidence": evidence,
                 "sql_dialect": BIRD_SQL_DIALECT,
+                **({"sql_schema": schema} if schema else {}),
             },
         )

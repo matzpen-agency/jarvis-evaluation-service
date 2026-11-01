@@ -132,6 +132,52 @@ def transpile_sql(sql: str, read: str | None, write: str | None) -> str | None:
         return None
 
 
+def adapt_sqlite_benchmark_sql(sql: str, schema: str, write: str | None) -> str | None:
+    """
+    Translate SQLite benchmark gold SQL (BIRD) for its database loaded into
+    `schema` with lower-case names: LIKE becomes case-insensitive as in SQLite,
+    identifiers are lower-cased (SQLite matches names case-insensitively even
+    when quoted) and tables are put in the schema. None if it can't parse.
+    """
+    try:
+        parsed = sqlglot.parse_one(sql, read="sqlite")
+    except Exception:
+        return None
+    if parsed is None:
+        return None
+    for like in list(parsed.find_all(exp.Like)):
+        like.replace(exp.ILike(this=like.this, expression=like.expression))
+    for identifier in parsed.find_all(exp.Identifier):
+        identifier.set("this", identifier.name.lower())
+    try:
+        return qualify_tables(parsed.sql(dialect=write), schema, write)
+    except Exception:
+        return None
+
+
+def qualify_tables(sql: str, schema: str, dialect: str | None) -> str:
+    """
+    Put every table that names no schema in `schema` (CTE names are left
+    alone), e.g. for gold SQL written for a database that lives in one schema
+    of the connection. Returns the SQL unchanged if it can't parse.
+    """
+    try:
+        parsed = sqlglot.parse_one(sql, read=dialect)
+    except Exception:
+        return sql
+    if parsed is None:
+        return sql
+    cte_names = {cte.alias_or_name.lower() for cte in parsed.find_all(exp.CTE)}
+    for table in parsed.find_all(exp.Table):
+        if table.args.get("db") or not table.name or table.name.lower() in cte_names:
+            continue
+        table.set("db", exp.to_identifier(schema))
+    try:
+        return parsed.sql(dialect=dialect)
+    except Exception:
+        return sql
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Cell normalisation
 # ─────────────────────────────────────────────────────────────────────────────

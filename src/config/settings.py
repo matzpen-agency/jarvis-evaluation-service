@@ -140,6 +140,10 @@ class Settings(BaseSettings):
     BIRD_DATASET_PATH: str = "src/config/bird/bird_verified_cot_2462.jsonl"
     # Append each question's "evidence" hint, as in BIRD's standard setting
     BIRD_INCLUDE_EVIDENCE: bool = True
+    # Bundled BIRD databases (<db_id>.sqlite) that load_bird_databases copies
+    # into a connection's database, one schema "<prefix><db_id>" each
+    BIRD_DATABASES_DIR: str = "src/config/bird/databases"
+    BIRD_SCHEMA_PREFIX: str = "bird_"
 
     # Numeric tolerance for result comparison (decimal places)
     NUMERIC_COMPARISON_TOLERANCE: int = 6

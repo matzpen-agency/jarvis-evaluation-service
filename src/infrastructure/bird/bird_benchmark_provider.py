@@ -3,7 +3,10 @@ bird_benchmark_provider.py — BIRD-Verified as a BenchmarkProvider.
 
 Requested as dataset "bird" on a connection named after a BIRD database
 (e.g. "movie_platform" or "bird_movie_platform"), which resolves to the
-dataset "bird-<db_id>" holding that database's questions.
+dataset "bird-<db_id>" holding that database's questions. On any other
+connection whose name starts with "bird" (e.g. "bird"), it resolves to
+"bird-all": the questions of every bundled database, loaded into that
+connection's database by load_bird_databases.py.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ import structlog
 
 from src.domain.entities.dataset_item import DatasetItem
 from src.infrastructure.bird.bird_dataset_loader import (
+    BIRD_ALL_BUNDLED,
     BIRD_DATASET_PREFIX,
     BirdDatasetLoader,
     bird_db_id_for_connection,
@@ -37,16 +41,24 @@ class BirdBenchmarkProvider(BenchmarkProvider):
 
     def dataset_for_connection(self, connection_name: str | None) -> str:
         db_id = bird_db_id_for_connection(connection_name)
-        if not db_id:
-            raise DatasetNotFoundError(
-                f"Can't tell which BIRD database this connection holds "
-                f"(connection name: {connection_name!r}). Name the connection after the BIRD db_id."
-            )
-        return f"{BIRD_DATASET_PREFIX}{db_id}"
+        if db_id and db_id in self._loader.db_ids():
+            return f"{BIRD_DATASET_PREFIX}{db_id}"
+        bundled = self._loader.bundled_db_ids()
+        if bundled and (connection_name or "").strip().lower().startswith("bird"):
+            return f"{BIRD_DATASET_PREFIX}{BIRD_ALL_BUNDLED}"
+        raise DatasetNotFoundError(
+            f"Connection {connection_name!r} doesn't hold a BIRD database. Run BIRD on a "
+            f"connection named after a BIRD database id, or on a connection whose name "
+            f"starts with 'bird' that reads the schemas loaded by load_bird_databases "
+            f"(bundled: {', '.join(bundled) or 'none'})."
+        )
 
     async def load(self, dataset_name: str) -> list[DatasetItem]:
         db_id = self._db_id(dataset_name)
-        items = await asyncio.to_thread(self._loader.load, db_id)
+        if db_id == BIRD_ALL_BUNDLED:
+            items = await asyncio.to_thread(self._loader.load_bundled)
+        else:
+            items = await asyncio.to_thread(self._loader.load, db_id)
         if not items:
             available = await asyncio.to_thread(self._loader.db_ids)
             raise DatasetNotFoundError(
@@ -57,8 +69,14 @@ class BirdBenchmarkProvider(BenchmarkProvider):
         return items
 
     def description(self, dataset_name: str) -> str:
-        return f"BIRD-Verified benchmark questions for database '{self._db_id(dataset_name)}'"
+        db_id = self._db_id(dataset_name)
+        if db_id == BIRD_ALL_BUNDLED:
+            return (
+                "BIRD-Verified benchmark questions for the bundled databases: "
+                + ", ".join(self._loader.bundled_db_ids())
+            )
+        return f"BIRD-Verified benchmark questions for database '{db_id}'"
 
     @staticmethod
     def _db_id(dataset_name: str) -> str:
-        return dataset_name[len(BIRD_DATASET_PREFIX):].strip().lower()
+        return dataset_name[len(BIRD_DATASET_PREFIX) :].strip().lower()

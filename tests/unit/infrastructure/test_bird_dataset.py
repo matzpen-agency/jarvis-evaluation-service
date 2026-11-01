@@ -161,7 +161,7 @@ async def test_connection_with_no_bird_name_is_a_clear_error(loader):
         runner=runner, metadata_provider=metadata, benchmark=BirdBenchmarkProvider(loader)
     )
 
-    with pytest.raises(DatasetNotFoundError, match="Name the connection after the BIRD db_id"):
+    with pytest.raises(DatasetNotFoundError, match="doesn't hold a BIRD database"):
         await use_case.execute(RunMcpDatasetRequest(dataset_name="bird", connection_id=7))
     runner.run.assert_not_called()
 
@@ -226,8 +226,11 @@ def test_bundled_dataset_loads_without_network(monkeypatch):
     bird = _get_benchmark_provider()._loader
     assert len(bird.db_ids()) == 69
     items = [i for db in bird.db_ids() for i in bird.load(db)]
-    assert len(items) == 2462
-    assert len({i.id for i in items}) == 2462
+    # bundled databases keep only questions whose gold SQL survives translation
+    assert len(items) == 2462 - 28
+    assert len({i.id for i in items}) == len(items)
+    assert bird.bundled_db_ids() == ["books", "car_retails", "retail_world"]
+    assert len(bird.load_bundled()) == 150
     assert all(i.expected_sql and i.metadata["grading_method"] for i in items)
 
 

@@ -45,9 +45,10 @@ class Settings(BaseSettings):
     # ── Agent's Trino: where the agent's generated SQL is executed ──────────
     # The agent writes and tests its SQL on its own Trino, where column types
     # can differ from the connection's database (Postgres money → varchar).
-    # Connections listed here run the generated SQL on that Trino, in the
-    # given catalog ("6=adventureworks,7=sales"); the golden SQL and all other
-    # connections still run on the connection through Jeen.
+    # Catalog every connection's SQL runs in on that Trino — the agent's
+    # TRINO_CATALOG (e.g. "dataverse"). Empty: only AGENT_TRINO_CATALOGS run there.
+    AGENT_TRINO_CATALOG: str = ""
+    # Per-connection exceptions to AGENT_TRINO_CATALOG ("6=adventureworks,7=sales")
     AGENT_TRINO_CATALOGS: str = ""
     AGENT_TRINO_HOST: str | None = None
     AGENT_TRINO_PORT: int = 443

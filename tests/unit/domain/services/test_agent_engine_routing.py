@@ -330,6 +330,54 @@ async def test_agent_trino_uses_the_mapped_catalog():
 
 
 @pytest.mark.unit
+@pytest.mark.asyncio
+async def test_agent_trino_default_catalog_covers_every_connection():
+    catalogs: list[str] = []
+
+    def factory(catalog):
+        catalogs.append(catalog)
+        return _FakeConnection(1)
+
+    executor = AgentTrinoQueryExecutor(
+        factory, {6: "adventureworks"}, default_catalog="dataverse"
+    )
+    # new connections need no configuration
+    assert executor.covers(6) and executor.covers(7) and executor.covers(12345)
+    for connection_id in (7, 12345, 6):
+        assert (await executor.execute("SELECT 1", connection_id=connection_id)).success
+    # per-connection overrides still win
+    assert catalogs == ["dataverse", "dataverse", "adventureworks"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("default", "overrides", "configured"),
+    [("dataverse", "", True), ("", "6=adventureworks", True), ("", "", False)],
+)
+def test_agent_executor_is_configured_by_default_catalog_or_overrides(
+    monkeypatch, default, overrides, configured
+):
+    from src.api.dependencies import container
+
+    settings = container.get_settings().model_copy(
+        update={
+            "AGENT_TRINO_HOST": "trino.example",
+            "AGENT_TRINO_CATALOG": default,
+            "AGENT_TRINO_CATALOGS": overrides,
+        }
+    )
+    monkeypatch.setattr(container, "get_settings", lambda: settings)
+    container._get_agent_executor.cache_clear()
+    try:
+        executor = container._get_agent_executor()
+        assert (executor is not None) == configured
+        if configured:
+            assert executor.covers(7) == bool(default)
+    finally:
+        container._get_agent_executor.cache_clear()
+
+
+@pytest.mark.unit
 def test_postgres_money_strings_match_trino_numbers():
     golden = QueryResult(
         success=True,

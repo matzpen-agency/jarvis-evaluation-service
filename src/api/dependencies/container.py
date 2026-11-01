@@ -142,11 +142,11 @@ def _verify_value(value: bool | str) -> bool | str:
 
 @lru_cache
 def _get_agent_executor() -> AgentSqlExecutor | None:
-    """Executor for generated SQL on the agent's own Trino, or None when no
-    connection is mapped to an agent Trino catalog."""
+    """Executor for SQL on the agent's own Trino, or None when it isn't
+    configured (no host, or neither a default catalog nor per-connection ones)."""
     settings = get_settings()
     catalogs = parse_catalog_map(settings.AGENT_TRINO_CATALOGS)
-    if not catalogs or not settings.AGENT_TRINO_HOST:
+    if not (catalogs or settings.AGENT_TRINO_CATALOG) or not settings.AGENT_TRINO_HOST:
         return None
 
     def _connection_factory(catalog: str):
@@ -171,6 +171,7 @@ def _get_agent_executor() -> AgentSqlExecutor | None:
         connection_factory=_connection_factory,
         catalogs=catalogs,
         max_rows=settings.AGENT_TRINO_MAX_ROWS,
+        default_catalog=settings.AGENT_TRINO_CATALOG,
     )
 
 

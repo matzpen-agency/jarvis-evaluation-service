@@ -16,9 +16,17 @@ from src.domain.entities.dataset_item import DatasetItem
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.evaluators.sql_comparison_utils import adapt_sqlite_benchmark_sql
 from src.domain.services.evaluation_runner import EvaluationRunner
-from src.infrastructure.bird import push_bird_to_oasis as oasis
+from src.infrastructure.bird import (
+    convert_bird_trino_questions as convert,
+    push_bird_to_oasis as oasis,
+)
 from src.infrastructure.bird.bird_benchmark_provider import BirdBenchmarkProvider
 from src.infrastructure.bird.bird_dataset_loader import BirdDatasetLoader
+from src.infrastructure.bird.load_bird_databases import (
+    bundle_types,
+    find_databases,
+    read_tables,
+)
 from src.infrastructure.bird.verify_bird_questions import gold_sql_for
 
 SCHEMA = "agency__bird-public-benchmark"
@@ -181,3 +189,75 @@ def test_push_script_names_match_the_gold_sql(shop):
     customers = next(p for p in oasis.plan_database(shop) if p.table == "customers")
     assert customers.english_name == "car_retails__customers"
     assert list(customers.columns.values()) == ["customer_id", "credit", "city"]
+
+
+# ── t2s_bird_trino_he bundle: Trino gold SQL and its databases ────────────────
+
+
+@pytest.mark.unit
+def test_trino_gold_sql_runs_on_the_pushed_tables(shop, tmp_path):
+    """The bundle's trino_sql reads <db_id>.<table> with names like "customer id"."""
+    original = sqlite3.connect(shop)
+    gold = (
+        'SELECT t1."customer id" AS "customer id", COUNT(orders.id) AS _col_1 '
+        'FROM customers AS t1 JOIN orders ON orders."customer id" = t1."customer id" '
+        "WHERE LOWER(t1.city) = 'paris' GROUP BY t1.\"customer id\""
+    )
+    expected = original.execute(
+        'SELECT c."Customer ID", COUNT(o.id) FROM Customers c JOIN Orders o '
+        'ON o."Customer ID" = c."Customer ID" WHERE LOWER(c.City) = \'paris\' '
+        'GROUP BY c."Customer ID"'
+    ).fetchall()
+
+    row = {"db_id": "car_retails", "trino_sql": gold}
+    sql = convert.target_sql(row, "dataverse", SCHEMA)
+    assert f'"{SCHEMA}".car_retails__customers AS t1' in sql
+    assert f'"{SCHEMA}".car_retails__orders AS orders' in sql
+    assert '"customer_id"' in sql
+    actual = _as_pushed(shop, tmp_path).execute(sql).fetchall()
+    assert actual == expected
+
+
+@pytest.mark.unit
+def test_trino_gold_sql_for_postgres_keeps_the_names():
+    row = {"db_id": "car_retails", "trino_sql": 'SELECT "customer id" FROM customers'}
+    assert convert.target_sql(row, "postgres") == (
+        'SELECT "customer id" FROM car_retails.customers'
+    )
+
+
+@pytest.mark.unit
+def test_bundle_layout_and_types(tmp_path, shop):
+    nested = tmp_path / "databases" / "car_retails"
+    nested.mkdir(parents=True)
+    shop.rename(nested / "car_retails.sqlite")
+    (tmp_path / "databases" / "books.sqlite").touch()
+    assert list(find_databases(tmp_path / "databases")) == ["books", "car_retails"]
+
+    schemas = tmp_path / "schemas"
+    schemas.mkdir()
+    (schemas / "car_retails.json").write_text(
+        json.dumps(
+            {
+                "tables": [
+                    {
+                        "name": "customers",
+                        "columns": [
+                            {"name": "customer id", "trino_type": "varchar"},
+                            {"name": "credit ($)", "trino_type": "double"},
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    types = bundle_types(schemas, "car_retails")
+    assert bundle_types(schemas, "books") is None
+    con = sqlite3.connect(nested / "car_retails.sqlite")
+    customers = next(t for t in read_tables(con, types) if t.name == "customers")
+    # the bundle's types win; columns it doesn't list are inferred as before
+    assert [(c.name, c.kind) for c in customers.columns] == [
+        ("customer id", "text"),
+        ("credit ($)", "double"),
+        ("city", "text"),
+    ]

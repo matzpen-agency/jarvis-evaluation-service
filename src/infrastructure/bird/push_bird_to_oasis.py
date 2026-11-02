@@ -18,6 +18,11 @@ Oasis UI:
                "<db_id>.<table>"), or a CSV file with columns source_id,token:
        python -m src.infrastructure.bird.push_bird_to_oasis push --databases-dir /data/bird --tokens tokens.json
 
+--databases-dir is a folder of <db_id>.sqlite files or of
+<db_id>/<db_id>.sqlite folders (the t2s_bird_trino_he bundle's databases/).
+Give that bundle's schemas/ folder as --schemas-dir so the column types are
+the ones its Trino gold SQL was converted for.
+
 Fill in X_API_TOKEN and POOL_ID below (or set OASIS_API_TOKEN / OASIS_POOL_ID)
 and don't commit them. Both steps can be re-run: what was done is kept in the
 state file (--state, oasis_bird_sources.json), so sources aren't created twice
@@ -37,7 +42,6 @@ import json
 import math
 import os
 import re
-import sqlite3
 import sys
 import time
 from collections.abc import Iterator
@@ -53,8 +57,10 @@ from src.infrastructure.bird.load_bird_databases import (
     _batches,
     _original_names,
     _say,
-    available_databases,
+    bundle_types,
     convert,
+    find_databases,
+    open_database,
     read_tables,
 )
 
@@ -217,19 +223,21 @@ def hebrew_name(plan: SourcePlan, used: set[str]) -> str:
 # ── Reading the databases ─────────────────────────────────────────────────────
 
 
-def plan_database(path: Path) -> list[SourcePlan]:
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+def plan_database(
+    path: Path, types: dict[str, dict[str, str]] | None = None, db_id: str | None = None
+) -> list[SourcePlan]:
+    con = open_database(path)
     try:
         originals = _original_names(con)
         return [
             SourcePlan(
-                db_id=path.stem,
+                db_id=db_id or path.stem,
                 table=t.name,
                 original_table=originals[t.name],
                 columns=field_names([c.name for c in t.columns]),
                 kinds=[c.kind for c in t.columns],
             )
-            for t in read_tables(con)
+            for t in read_tables(con, types)
         ]
     finally:
         con.close()
@@ -245,7 +253,7 @@ def _value(value: Any, kind: str) -> Any:
 
 
 def records(path: Path, plan: SourcePlan, skip: int = 0) -> Iterator[dict]:
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con = open_database(path)
     try:
         fields = list(plan.columns.values())
         for row in con.execute(
@@ -259,7 +267,7 @@ def records(path: Path, plan: SourcePlan, skip: int = 0) -> Iterator[dict]:
 
 
 def row_count(path: Path, plan: SourcePlan) -> int:
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con = open_database(path)
     try:
         return con.execute(f'SELECT COUNT(*) FROM "{plan.original_table}"').fetchone()[
             0
@@ -437,6 +445,11 @@ def main(argv: list[str] | None = None) -> None:
         "databases", nargs="*", help="db_ids (default: every .sqlite file)"
     )
     parser.add_argument("--databases-dir", type=Path, default=DATABASES_DIR)
+    parser.add_argument(
+        "--schemas-dir",
+        type=Path,
+        help="t2s_bird_trino_he schemas/ folder: take the column types from it",
+    )
     parser.add_argument("--state", type=Path, default=Path("oasis_bird_sources.json"))
     parser.add_argument(
         "--tokens", type=Path, help="push: Source-Access-Token per source"
@@ -453,11 +466,16 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
-    db_ids = args.databases or available_databases(args.databases_dir)
-    paths = {d: args.databases_dir / f"{d}.sqlite" for d in db_ids}
-    if absent := [str(p) for p in paths.values() if not p.exists()]:
-        parser.error(f"not found: {', '.join(absent)}")
-    plans = [plan for d in db_ids for plan in plan_database(paths[d])]
+    found = find_databases(args.databases_dir)
+    db_ids = args.databases or list(found)
+    if absent := sorted(set(db_ids) - set(found)):
+        parser.error(f"not in {args.databases_dir}: {', '.join(absent)}")
+    paths = {d: found[d] for d in db_ids}
+    plans = [
+        plan
+        for d in db_ids
+        for plan in plan_database(paths[d], bundle_types(args.schemas_dir, d), d)
+    ]
     _say(f"{len(db_ids)} databases, {len(plans)} tables")
 
     state = State(args.state)

@@ -173,6 +173,28 @@ def adapt_sqlite_benchmark_sql(
         return None
 
 
+def to_dataverse_sql(
+    sql: str, schema: str, table_prefix: str, dialect: str = "trino"
+) -> str | None:
+    """
+    Point SQL written for a database in its own schema at the same database
+    pushed to dataverse through Oasis: every name cleaned as clean_name does,
+    tables renamed "<table_prefix><table>" in `schema`. None if it can't parse.
+    """
+    try:
+        parsed = sqlglot.parse_one(sql, read=dialect)
+    except Exception:
+        return None
+    if parsed is None:
+        return None
+    for identifier in parsed.find_all(exp.Identifier):
+        identifier.set("this", clean_name(identifier.name))
+    try:
+        return qualify_tables(parsed.sql(dialect=dialect), schema, dialect, table_prefix)
+    except Exception:
+        return None
+
+
 def qualify_tables(
     sql: str, schema: str, dialect: str | None, table_prefix: str = ""
 ) -> str:

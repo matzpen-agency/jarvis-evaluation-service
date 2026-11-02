@@ -20,11 +20,21 @@ Two targets:
 
 Re-running replaces the tables. Afterwards add (or refresh) the Jeen connection
 that reads these schemas and run the dataset "bird" on it.
+
+Other BIRD databases: --databases-dir takes a folder of <db_id>.sqlite files or
+of <db_id>/<db_id>.sqlite folders (the t2s_bird_trino_he bundle's databases/).
+With that bundle's schemas/ folder as --schemas-dir, the column types are the
+ones its Trino gold SQL was converted for. --schema-prefix "" names each
+schema after its db_id, as that gold SQL expects:
+    python -m src.infrastructure.bird.load_bird_databases --target postgres \\
+        --dsn postgresql://... --databases-dir bundle/databases \\
+        --schemas-dir bundle/schemas --schema-prefix ""
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 from collections.abc import Iterator
@@ -59,8 +69,45 @@ class Table:
     foreign_keys: list[tuple[list[str], str, list[str]]] = field(default_factory=list)
 
 
+def find_databases(directory: Path = DATABASES_DIR) -> dict[str, Path]:
+    """db_id → SQLite file, for <db_id>.sqlite and <db_id>/<db_id>.sqlite."""
+    found = {
+        p.parent.name: p
+        for p in directory.glob("*/*.sqlite")
+        if p.stem == p.parent.name
+    }
+    found.update({p.stem: p for p in directory.glob("*.sqlite")})
+    return dict(sorted(found.items()))
+
+
 def available_databases(directory: Path = DATABASES_DIR) -> list[str]:
-    return sorted(p.stem for p in directory.glob("*.sqlite"))
+    return list(find_databases(directory))
+
+
+def open_database(path: Path) -> sqlite3.Connection:
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    # A few BIRD databases hold text that isn't valid UTF-8
+    con.text_factory = lambda b: b.decode("utf-8", "replace")
+    return con
+
+
+# Types in the t2s_bird_trino_he bundle's schemas/<db_id>.json → column kinds
+_BUNDLE_KINDS = {"bigint": "bigint", "double": "double", "varbinary": "binary"}
+
+
+def bundle_types(
+    schemas_dir: Path | None, db_id: str
+) -> dict[str, dict[str, str]] | None:
+    """{table: {column: kind}} from the bundle's schema file, if there is one."""
+    path = schemas_dir / f"{db_id}.json" if schemas_dir else None
+    if path is None or not path.exists():
+        return None
+    return {
+        t["name"]: {
+            c["name"]: _BUNDLE_KINDS.get(c["trino_type"], "text") for c in t["columns"]
+        }
+        for t in json.loads(path.read_text(encoding="utf-8"))["tables"]
+    }
 
 
 def schema_name(db_id: str, prefix: str = DEFAULT_SCHEMA_PREFIX) -> str:
@@ -88,8 +135,13 @@ def _fits(kind: str, value: Any) -> bool:
     return True
 
 
-def read_tables(con: sqlite3.Connection) -> list[Table]:
-    """Tables with lower-case names and the narrowest type every value fits (else text)."""
+def read_tables(
+    con: sqlite3.Connection, types: dict[str, dict[str, str]] | None = None
+) -> list[Table]:
+    """
+    Tables with lower-case names and the narrowest type every value fits
+    (else text), or the column kinds given in `types` ({table: {column: kind}}).
+    """
     names = [
         r[0]
         for r in con.execute(
@@ -101,7 +153,11 @@ def read_tables(con: sqlite3.Connection) -> list[Table]:
     for name in names:
         info = con.execute(f'PRAGMA table_info("{name}")').fetchall()
         columns = []
+        given = (types or {}).get(name.lower(), {})
         for _, col, declared, _, _, _ in info:
+            if col.lower() in given:
+                columns.append(Column(col.lower(), given[col.lower()]))
+                continue
             kind = _declared_kind(declared)
             if kind != "text":
                 values = con.execute(
@@ -171,12 +227,13 @@ def load_into_trino(
     con: sqlite3.Connection,
     batch_size: int = 500,
     log=None,
+    types: dict[str, dict[str, str]] | None = None,
 ) -> None:
     log = log or _say
     run = lambda sql: (cursor.execute(sql), cursor.fetchall())  # noqa: E731
     target = f"{_ident(catalog)}.{_ident(schema)}"
     run(f"CREATE SCHEMA IF NOT EXISTS {target}")
-    tables = read_tables(con)
+    tables = read_tables(con, types)
     originals = _original_names(con)
     for table in tables:
         full = f"{target}.{_ident(table.name)}"
@@ -212,11 +269,18 @@ def load_into_trino(
 # ── Postgres ──────────────────────────────────────────────────────────────────
 
 
-def load_into_postgres(pg, schema: str, con: sqlite3.Connection, log=None) -> None:
+def load_into_postgres(
+    pg,
+    schema: str,
+    con: sqlite3.Connection,
+    log=None,
+    types: dict[str, dict[str, str]] | None = None,
+    batch_size: int = 10_000,
+) -> None:
     log = log or _say
     from psycopg2.extras import execute_values
 
-    tables = read_tables(con)
+    tables = read_tables(con, types)
     originals = _original_names(con)
     with pg.cursor() as cur:
         cur.execute(f"DROP SCHEMA IF EXISTS {_ident(schema)} CASCADE")
@@ -227,14 +291,20 @@ def load_into_postgres(pg, schema: str, con: sqlite3.Connection, log=None) -> No
                 f"{_ident(c.name)} {_TYPES[c.kind][1]}" for c in table.columns
             )
             cur.execute(f"CREATE TABLE {full} ({cols})")
-            rows = [
-                tuple(
-                    convert(v, c.kind) for v, c in zip(row, table.columns, strict=True)
+            count = 0
+            for batch in _batches(read_rows(con, originals[table.name]), batch_size):
+                rows = [
+                    tuple(
+                        _pg_value(convert(v, c.kind))
+                        for v, c in zip(row, table.columns, strict=True)
+                    )
+                    for row in batch
+                ]
+                execute_values(
+                    cur, f"INSERT INTO {full} VALUES %s", rows, page_size=1000
                 )
-                for row in read_rows(con, originals[table.name])
-            ]
-            execute_values(cur, f"INSERT INTO {full} VALUES %s", rows, page_size=1000)
-            log(f"  {schema}.{table.name}: {len(rows)} rows")
+                count += len(rows)
+            log(f"  {schema}.{table.name}: {count} rows")
         for statement in _key_statements(schema, tables):
             cur.execute("SAVEPOINT key")
             try:
@@ -244,6 +314,11 @@ def load_into_postgres(pg, schema: str, con: sqlite3.Connection, log=None) -> No
                 log(f"  key skipped: {statement[:90]}… ({str(exc).splitlines()[0]})")
         cur.execute("ANALYZE")
     pg.commit()
+
+
+def _pg_value(value: Any) -> Any:
+    # Postgres text can't hold NUL characters
+    return value.replace("\x00", "") if isinstance(value, str) else value
 
 
 def _key_statements(schema: str, tables: list[Table]) -> list[str]:
@@ -330,13 +405,25 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--dsn", help="Postgres connection string (target postgres)")
     parser.add_argument("--schema-prefix", default=DEFAULT_SCHEMA_PREFIX)
+    parser.add_argument(
+        "--databases-dir",
+        type=Path,
+        default=DATABASES_DIR,
+        help="folder of <db_id>.sqlite or <db_id>/<db_id>.sqlite (default: the bundled ones)",
+    )
+    parser.add_argument(
+        "--schemas-dir",
+        type=Path,
+        help="t2s_bird_trino_he schemas/ folder: take the column types from it",
+    )
     args = parser.parse_args(argv)
 
-    databases = args.databases or available_databases()
-    unknown = sorted(set(databases) - set(available_databases()))
+    paths = find_databases(args.databases_dir)
+    databases = args.databases or list(paths)
+    unknown = sorted(set(databases) - set(paths))
     if unknown:
         parser.error(
-            f"not bundled: {', '.join(unknown)} (bundled: {', '.join(available_databases())})"
+            f"not in {args.databases_dir}: {', '.join(unknown)} (found: {', '.join(paths)})"
         )
 
     if args.target == "trino":
@@ -353,14 +440,13 @@ def main(argv: list[str] | None = None) -> None:
     for db_id in databases:
         schema = schema_name(db_id, args.schema_prefix)
         _say(f"Loading {db_id} into {schema}…")
-        con = sqlite3.connect(
-            f"file:{DATABASES_DIR / (db_id + '.sqlite')}?mode=ro", uri=True
-        )
+        con = open_database(paths[db_id])
+        types = bundle_types(args.schemas_dir, db_id)
         try:
             if args.target == "trino":
-                load_into_trino(cursor, args.catalog, schema, con)
+                load_into_trino(cursor, args.catalog, schema, con, types=types)
             else:
-                load_into_postgres(pg, schema, con)
+                load_into_postgres(pg, schema, con, types=types)
         finally:
             con.close()
     _say(

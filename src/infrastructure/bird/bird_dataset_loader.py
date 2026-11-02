@@ -37,7 +37,6 @@ from pathlib import Path
 import structlog
 
 from src.domain.entities.dataset_item import DatasetItem
-from src.domain.evaluators.sql_comparison_utils import clean_name
 
 logger = structlog.get_logger(__name__)
 
@@ -105,11 +104,7 @@ class BirdDatasetLoader:
         if verified is not None:
             rows = [row for row in rows if row["question_id"] in verified]
         if self._dataverse_schema:
-            naming = {
-                "sql_schema": self._dataverse_schema,
-                "sql_table_prefix": f"{clean_name(db_id)}__",
-                "sql_clean_names": True,
-            }
+            naming = {"sql_schema": self._dataverse_schema, "sql_db_id": db_id}
         else:
             naming = {"sql_schema": f"{self._schema_prefix}{db_id}".lower()}
         return [self._to_item(row, naming) for row in rows]

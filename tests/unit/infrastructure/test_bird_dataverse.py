@@ -61,11 +61,12 @@ def _as_pushed(source, tmp_path):
     for plan in oasis.plan_database(source):
         fields = list(plan.columns.values())
         con.execute(
-            f'CREATE TABLE "{SCHEMA}".{plan.english_name} ({", ".join(fields)})'
+            f'CREATE TABLE "{SCHEMA}"."{plan.english_name}" ({", ".join(fields)})'
         )
         rows = [list(r.values()) for r in oasis.records(source, plan)]
         con.executemany(
-            f'INSERT INTO "{SCHEMA}".{plan.english_name} VALUES ({", ".join("?" * len(fields))})',
+            f'INSERT INTO "{SCHEMA}"."{plan.english_name}" '
+            f"VALUES ({', '.join('?' * len(fields))})",
             rows,
         )
     return con
@@ -88,10 +89,8 @@ def test_gold_sql_returns_the_same_on_the_pushed_tables(shop, tmp_path, gold):
     original = sqlite3.connect(shop)
     expected = sorted(original.execute(gold).fetchall())
 
-    sql = adapt_sqlite_benchmark_sql(
-        gold, SCHEMA, "sqlite", table_prefix="car_retails__", clean_names=True
-    )
-    assert f'"{SCHEMA}".car_retails__' in sql
+    sql = adapt_sqlite_benchmark_sql(gold, SCHEMA, "sqlite", db_id="car_retails")
+    assert f'"{SCHEMA}"."car-retails-' in sql
     actual = sorted(_as_pushed(shop, tmp_path).execute(sql).fetchall())
     assert actual == expected
 
@@ -105,7 +104,7 @@ def test_gold_sql_for_trino_on_dataverse():
         "car_retails",
     )
     assert sql == (
-        f'SELECT "customer_id" FROM "{SCHEMA}".car_retails__customers AS customers '
+        f'SELECT "customer_id" FROM "{SCHEMA}"."car-retails-customers" AS customers '
         "WHERE LOWER(city) LIKE LOWER('a%')"
     )
 
@@ -119,8 +118,7 @@ def test_runner_uses_the_dataverse_names():
         metadata={
             "sql_dialect": "sqlite",
             "sql_schema": SCHEMA,
-            "sql_table_prefix": "car_retails__",
-            "sql_clean_names": True,
+            "sql_db_id": "car_retails",
         },
     )
     ctx = EvaluationContext(
@@ -133,7 +131,7 @@ def test_runner_uses_the_dataverse_names():
     )
     EvaluationRunner._adapt_expected_sql(ctx)
     assert ctx.expected_sql == (
-        f'SELECT "customer_id" FROM "{SCHEMA}".car_retails__customers AS customers'
+        f'SELECT "customer_id" FROM "{SCHEMA}"."car-retails-customers" AS customers'
     )
 
 
@@ -167,8 +165,7 @@ def test_every_database_is_on_dataverse(loader):
     assert loader.bundled_db_ids() == ["movie_platform", "shop"]
     item = loader.load("movie_platform")[0]
     assert item.metadata["sql_schema"] == SCHEMA
-    assert item.metadata["sql_table_prefix"] == "movie_platform__"
-    assert item.metadata["sql_clean_names"] is True
+    assert item.metadata["sql_db_id"] == "movie_platform"
     # only the questions verified on dataverse; unverified databases keep all
     assert [i.id for i in loader.load("shop")] == ["bird-2"]
     assert [i.id for i in loader.load_bundled()] == ["bird-3", "bird-2"]
@@ -187,7 +184,7 @@ async def test_bird_on_the_pool_connection_runs_every_database(loader):
 @pytest.mark.unit
 def test_push_script_names_match_the_gold_sql(shop):
     customers = next(p for p in oasis.plan_database(shop) if p.table == "customers")
-    assert customers.english_name == "car_retails__customers"
+    assert customers.english_name == "car-retails-customers"
     assert list(customers.columns.values()) == ["customer_id", "credit", "city"]
 
 
@@ -211,8 +208,8 @@ def test_trino_gold_sql_runs_on_the_pushed_tables(shop, tmp_path):
 
     row = {"db_id": "car_retails", "trino_sql": gold}
     sql = convert.target_sql(row, "dataverse", SCHEMA)
-    assert f'"{SCHEMA}".car_retails__customers AS t1' in sql
-    assert f'"{SCHEMA}".car_retails__orders AS orders' in sql
+    assert f'"{SCHEMA}"."car-retails-customers" AS t1' in sql
+    assert f'"{SCHEMA}"."car-retails-orders" AS orders' in sql
     assert '"customer_id"' in sql
     actual = _as_pushed(shop, tmp_path).execute(sql).fetchall()
     assert actual == expected

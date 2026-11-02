@@ -69,7 +69,7 @@ def test_create_then_push(database, tmp_path):
     oasis.create_sources(client, plans, state, "api-token", "pool-1")
     orders = fake.created[0]
     assert orders["is-flowing"] is True
-    assert orders["properties"]["english-source-name"] == "shop__orders"
+    assert orders["properties"]["english-source-name"] == "shop-orders"
     schema = json.loads(orders["schema"]["schema"])
     assert [f["name"] for f in schema["fields"]] == ["order_id", "total", "note", "pic"]
     assert [f["type"][1] for f in schema["fields"]] == [
@@ -81,7 +81,7 @@ def test_create_then_push(database, tmp_path):
     assert "map" not in orders["schema"]["schema"]
     assert fake.pools == [("/catalog/api/pools/pool-1/sources", ["src-1", "src-2"])]
     assert state.sources["shop.orders"]["trino_table"] == (
-        'dataverse."agency__bird-public-benchmark".shop__orders'
+        'dataverse."agency__bird-public-benchmark"."shop-orders"'
     )
 
     # Re-running creates nothing new

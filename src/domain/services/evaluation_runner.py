@@ -188,7 +188,9 @@ class EvaluationRunner:
                 try:
                     callback(*args)
                 except Exception as exc:
-                    logger.warning("evaluation_runner.progress_callback_failed", error=str(exc))
+                    logger.warning(
+                        "evaluation_runner.progress_callback_failed", error=str(exc)
+                    )
             return record
 
         records: list[SampleRecord] = await asyncio.gather(
@@ -333,7 +335,7 @@ class EvaluationRunner:
         benchmark database loaded into one schema of the connection
         ("sql_schema") also gets SQLite's case-insensitive names and LIKE,
         and, when pushed to dataverse, its tables' and columns' dataverse names
-        ("sql_table_prefix", "sql_clean_names").
+        ("sql_db_id").
         """
         metadata = context.dataset_item.metadata or {}
         source_dialect = metadata.get("sql_dialect")
@@ -343,10 +345,13 @@ class EvaluationRunner:
                 context.expected_sql,
                 schema,
                 context.dialect or "postgres",
-                table_prefix=metadata.get("sql_table_prefix", ""),
-                clean_names=bool(metadata.get("sql_clean_names")),
+                db_id=metadata.get("sql_db_id"),
             )
-        elif not source_dialect or not context.dialect or source_dialect == context.dialect:
+        elif (
+            not source_dialect
+            or not context.dialect
+            or source_dialect == context.dialect
+        ):
             return
         else:
             transpiled = transpile_sql(
@@ -357,7 +362,10 @@ class EvaluationRunner:
             context.expected_sql = transpiled
 
     def _error_results(self, error: str) -> list[EvaluationResult]:
-        return [EvaluationResult.from_error(name, error) for name in self._engine.evaluator_names]
+        return [
+            EvaluationResult.from_error(name, error)
+            for name in self._engine.evaluator_names
+        ]
 
     async def _run_agent(self, context: EvaluationContext, agent_kwargs: dict) -> None:
         """Call the agent; failures are recorded on the context, never raised."""
@@ -378,7 +386,9 @@ class EvaluationRunner:
             context.timed_out = True
             context.agent_call_timed_out = True
             context.error = "agent_call_timed_out"
-            logger.warning("evaluation_runner.agent_timeout", item_id=context.dataset_item.id)
+            logger.warning(
+                "evaluation_runner.agent_timeout", item_id=context.dataset_item.id
+            )
             return
         except Exception as exc:
             context.agent_crashed = True
@@ -415,7 +425,9 @@ class EvaluationRunner:
             if val is not None:
                 context.metadata[key] = val
 
-    async def _execute_and_evaluate(self, context: EvaluationContext) -> list[EvaluationResult]:
+    async def _execute_and_evaluate(
+        self, context: EvaluationContext
+    ) -> list[EvaluationResult]:
         """Execute expected and generated SQL, then run every evaluator."""
         coros = []
         if context.expected_sql:
@@ -430,7 +442,9 @@ class EvaluationRunner:
         )
 
         if context.generated_result and context.generated_result.success:
-            context.metadata["total_execution_time_ms"] = context.generated_result.execution_time_ms
+            context.metadata["total_execution_time_ms"] = (
+                context.generated_result.execution_time_ms
+            )
         if context.expected_result is not None and not context.expected_result.success:
             context.metadata["expected_sql_error"] = context.expected_result.error
 
@@ -458,7 +472,9 @@ class EvaluationRunner:
         if result.success or "money" not in (result.error or "").lower():
             return
 
-        rewritten = cast_money_to_numeric(sql, context.schema_map, context.dialect or "postgres")
+        rewritten = cast_money_to_numeric(
+            sql, context.schema_map, context.dialect or "postgres"
+        )
         if rewritten == sql:
             return
         retry = await self._safe_execute(rewritten, context.connection_id)
@@ -468,10 +484,13 @@ class EvaluationRunner:
             context.expected_result = retry
             context.metadata["expected_sql_money_cast"] = True
             logger.info(
-                "evaluation_runner.expected_sql_money_cast", item_id=context.dataset_item.id
+                "evaluation_runner.expected_sql_money_cast",
+                item_id=context.dataset_item.id,
             )
 
-    async def _execute_expected_on_agent_engine(self, context: EvaluationContext) -> bool:
+    async def _execute_expected_on_agent_engine(
+        self, context: EvaluationContext
+    ) -> bool:
         """
         Run the golden SQL on the agent's engine, transpiled from the
         connection's dialect. Money columns are cast to numbers up front: that
@@ -481,7 +500,10 @@ class EvaluationRunner:
         """
         sql = context.expected_sql or ""
         if context.dialect and context.dialect != context.agent_dialect:
-            sql = transpile_sql(sql, read=context.dialect, write=context.agent_dialect) or ""
+            sql = (
+                transpile_sql(sql, read=context.dialect, write=context.agent_dialect)
+                or ""
+            )
         if not sql:
             context.metadata["expected_sql_agent_engine_error"] = (
                 f"could not transpile the golden SQL from {context.dialect} to "
@@ -490,7 +512,9 @@ class EvaluationRunner:
             return False
 
         candidates = [sql]
-        with_numeric_money = cast_money_to_numeric(sql, context.schema_map, context.agent_dialect)
+        with_numeric_money = cast_money_to_numeric(
+            sql, context.schema_map, context.agent_dialect
+        )
         if with_numeric_money != sql:
             candidates.insert(0, with_numeric_money)
 
@@ -507,7 +531,9 @@ class EvaluationRunner:
                     context.metadata["expected_sql_money_cast"] = True
                 return True
 
-        context.metadata["expected_sql_agent_engine_error"] = result.error if result else None
+        context.metadata["expected_sql_agent_engine_error"] = (
+            result.error if result else None
+        )
         logger.info(
             "evaluation_runner.expected_sql_agent_engine_failed",
             item_id=context.dataset_item.id,
@@ -533,9 +559,15 @@ class EvaluationRunner:
         context.executed_generated_sql = sql
         context.generated_result = result
 
-        if result.success or not context.dialect or context.dialect == context.agent_dialect:
+        if (
+            result.success
+            or not context.dialect
+            or context.dialect == context.agent_dialect
+        ):
             return
-        transpiled = transpile_sql(sql, read=context.agent_dialect, write=context.dialect)
+        transpiled = transpile_sql(
+            sql, read=context.agent_dialect, write=context.dialect
+        )
         if not transpiled or transpiled.strip() == sql.strip():
             return
 

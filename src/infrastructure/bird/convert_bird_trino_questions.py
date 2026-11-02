@@ -7,7 +7,7 @@ the original lower-case names ("county name"), and names no schema. This adds
 `target_sql` to every question, for one of the two layouts:
 
   dataverse  the databases pushed with push_bird_to_oasis.py:
-               "agency__bird-public-benchmark".<db_id>__<table>, cleaned names
+               "agency__bird-public-benchmark"."<db-id>-<table>", cleaned columns
   postgres   the databases loaded by load_bird_databases.py --schema-prefix "":
                the same SQL, its tables put in schema <db_id> (so one Jeen
                connection can hold every database)
@@ -30,7 +30,6 @@ from pathlib import Path
 
 from src.domain.entities.query_result import QueryResult
 from src.domain.evaluators.sql_comparison_utils import (
-    clean_name,
     compare_results,
     qualify_tables,
     to_dataverse_sql,
@@ -47,7 +46,7 @@ from src.infrastructure.bird.push_bird_to_oasis import TRINO_SCHEMA
 def target_sql(row: dict, layout: str, schema: str = TRINO_SCHEMA) -> str | None:
     db_id = row["db_id"].lower()
     if layout == "dataverse":
-        return to_dataverse_sql(row["trino_sql"], schema, f"{clean_name(db_id)}__")
+        return to_dataverse_sql(row["trino_sql"], schema, db_id)
     return qualify_tables(row["trino_sql"], db_id, "trino")
 
 

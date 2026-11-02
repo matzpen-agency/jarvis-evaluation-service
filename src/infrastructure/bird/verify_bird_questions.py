@@ -33,7 +33,6 @@ from pathlib import Path
 from src.domain.entities.query_result import QueryResult
 from src.domain.evaluators.sql_comparison_utils import (
     adapt_sqlite_benchmark_sql,
-    clean_name,
     compare_results,
     parse_grading_method,
     transpile_sql,
@@ -62,10 +61,7 @@ def gold_sql_for(
     The gold SQL as the evaluation runs it on a Postgres connection / the
     agent's Trino; with db_id, on the database pushed to dataverse in `schema`.
     """
-    naming = (
-        {"table_prefix": f"{clean_name(db_id)}__", "clean_names": True} if db_id else {}
-    )
-    adapted = adapt_sqlite_benchmark_sql(sql, schema, "postgres", **naming)
+    adapted = adapt_sqlite_benchmark_sql(sql, schema, "postgres", db_id)
     if adapted is None or target == "postgres":
         return adapted
     return transpile_sql(adapted, read="postgres", write="trino")

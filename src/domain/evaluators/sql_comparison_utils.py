@@ -95,13 +95,19 @@ def order_key_indices(
 
         if isinstance(key, exp.Literal) and key.is_int:
             pos = int(key.this) - 1
-        elif isinstance(key, exp.Column) and not key.table and names.count(key.name.lower()) == 1:
+        elif (
+            isinstance(key, exp.Column)
+            and not key.table
+            and names.count(key.name.lower()) == 1
+        ):
             pos = names.index(key.name.lower())
 
         if pos is None and positional:
             key_sql = key.sql(dialect=dialect).lower()
             for i, projection in enumerate(projections):
-                inner = projection.this if isinstance(projection, exp.Alias) else projection
+                inner = (
+                    projection.this if isinstance(projection, exp.Alias) else projection
+                )
                 if inner.sql(dialect=dialect).lower() == key_sql:
                     pos = i
                     break
@@ -141,20 +147,31 @@ def clean_name(name: str) -> str:
     return f"_{cleaned}" if cleaned[0].isdigit() else cleaned
 
 
+def kebab_name(name: str) -> str:
+    """
+    A name as Oasis requires for a source's english-source-name, which becomes
+    the dataverse Trino table name: lower-case, every run of other characters a
+    single hyphen.
+    """
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "x"
+
+
+def dataverse_table_name(db_id: str, table: str) -> str:
+    """The dataverse Trino table name of a BIRD table: kebab-case <db_id>__<table>."""
+    return kebab_name(f"{db_id}__{table}")
+
+
 def adapt_sqlite_benchmark_sql(
-    sql: str,
-    schema: str,
-    write: str | None,
-    table_prefix: str = "",
-    clean_names: bool = False,
+    sql: str, schema: str, write: str | None, db_id: str | None = None
 ) -> str | None:
     """
     Translate SQLite benchmark gold SQL (BIRD) for its database loaded into
     `schema` with lower-case names: LIKE becomes case-insensitive as in SQLite,
     identifiers are lower-cased (SQLite matches names case-insensitively even
-    when quoted) and tables are put in the schema. For a database pushed to
-    dataverse through Oasis, `clean_names` cleans every name as clean_name
-    does and tables are named "<table_prefix><table>". None if it can't parse.
+    when quoted) and tables are put in the schema. With `db_id`, the database
+    was pushed to dataverse through Oasis: column names are cleaned as
+    clean_name does and each table becomes dataverse_table_name(db_id, table).
+    None if it can't parse.
     """
     try:
         parsed = sqlglot.parse_one(sql, read="sqlite")
@@ -166,20 +183,21 @@ def adapt_sqlite_benchmark_sql(
         like.replace(exp.ILike(this=like.this, expression=like.expression))
     for identifier in parsed.find_all(exp.Identifier):
         name = identifier.name.lower()
-        identifier.set("this", clean_name(name) if clean_names else name)
+        identifier.set("this", clean_name(name) if db_id else name)
     try:
-        return qualify_tables(parsed.sql(dialect=write), schema, write, table_prefix)
+        return qualify_tables(parsed.sql(dialect=write), schema, write, db_id)
     except Exception:
         return None
 
 
 def to_dataverse_sql(
-    sql: str, schema: str, table_prefix: str, dialect: str = "trino"
+    sql: str, schema: str, db_id: str, dialect: str = "trino"
 ) -> str | None:
     """
     Point SQL written for a database in its own schema at the same database
-    pushed to dataverse through Oasis: every name cleaned as clean_name does,
-    tables renamed "<table_prefix><table>" in `schema`. None if it can't parse.
+    pushed to dataverse through Oasis: column names cleaned as clean_name does,
+    each table becomes dataverse_table_name(db_id, table) in `schema`. None if
+    it can't parse.
     """
     try:
         parsed = sqlglot.parse_one(sql, read=dialect)
@@ -190,20 +208,21 @@ def to_dataverse_sql(
     for identifier in parsed.find_all(exp.Identifier):
         identifier.set("this", clean_name(identifier.name))
     try:
-        return qualify_tables(parsed.sql(dialect=dialect), schema, dialect, table_prefix)
+        return qualify_tables(parsed.sql(dialect=dialect), schema, dialect, db_id)
     except Exception:
         return None
 
 
 def qualify_tables(
-    sql: str, schema: str, dialect: str | None, table_prefix: str = ""
+    sql: str, schema: str, dialect: str | None, db_id: str | None = None
 ) -> str:
     """
     Put every table that names no schema in `schema` (CTE names are left
     alone), e.g. for gold SQL written for a database that lives in one schema
-    of the connection. With `table_prefix`, the table is also renamed to
-    "<table_prefix><table>" and keeps its old name as alias, so columns
-    qualified by it still resolve. Returns the SQL unchanged if it can't parse.
+    of the connection. With `db_id`, the table is also renamed to
+    dataverse_table_name(db_id, table) (kebab-case, so quoted) and keeps its
+    old name as alias, so columns qualified by it still resolve. Returns the
+    SQL unchanged if it can't parse.
     """
     try:
         parsed = sqlglot.parse_one(sql, read=dialect)
@@ -216,10 +235,12 @@ def qualify_tables(
         if table.args.get("db") or not table.name or table.name.lower() in cte_names:
             continue
         table.set("db", exp.to_identifier(schema))
-        if table_prefix:
+        if db_id:
             if not table.alias:
                 table.set("alias", exp.TableAlias(this=exp.to_identifier(table.name)))
-            table.set("this", exp.to_identifier(f"{table_prefix}{table.name}"))
+            table.set(
+                "this", exp.to_identifier(dataverse_table_name(db_id, table.name))
+            )
     try:
         return parsed.sql(dialect=dialect)
     except Exception:
@@ -270,7 +291,9 @@ def _normalize_iso_datetime(text: str) -> str | None:
     if not match:
         return None
     date_part, time_part, tz_part = match.groups()
-    if (time_part is None or _ZERO_TIME_RE.fullmatch(time_part)) and tz_part in _UTC_SUFFIXES:
+    if (
+        time_part is None or _ZERO_TIME_RE.fullmatch(time_part)
+    ) and tz_part in _UTC_SUFFIXES:
         return date_part
     time_part = re.sub(r"\.0+$", "", time_part or "00:00:00")
     if len(time_part) == 5:
@@ -431,7 +454,9 @@ def _find_column_mapping(
         gen_idx = [assignment[i] for i in exp_idx]
         if subset:
             exp_set = {tuple(row[i] for i in exp_idx) for row in expected_rows}
-            return all(tuple(row[j] for j in gen_idx) in exp_set for row in generated_rows)
+            return all(
+                tuple(row[j] for j in gen_idx) in exp_set for row in generated_rows
+            )
         exp_proj = Counter(tuple(row[i] for i in exp_idx) for row in expected_rows)
         gen_proj = Counter(tuple(row[j] for j in gen_idx) for row in generated_rows)
         return exp_proj == gen_proj
@@ -442,7 +467,8 @@ def _find_column_mapping(
             if not requires_ordering:
                 return True
             projected = [
-                tuple(row[assignment[i]] for i in range(n_exp)) for row in generated_rows
+                tuple(row[assignment[i]] for i in range(n_exp))
+                for row in generated_rows
             ]
             if _rows_in_expected_order(expected_rows, projected, key_indices):
                 return True
@@ -571,7 +597,11 @@ def compare_results(
         if expected_result.truncated and generated_result.truncated:
             exp_total = expected_result.total_row_count
             gen_total = generated_result.total_row_count
-            if exp_total is not None and gen_total is not None and exp_total != gen_total:
+            if (
+                exp_total is not None
+                and gen_total is not None
+                and exp_total != gen_total
+            ):
                 details["expected_total_rows"] = exp_total
                 details["generated_total_rows"] = gen_total
                 return 0.0, {**details, "reason": "row_count_mismatch"}
@@ -672,7 +702,11 @@ def _generate_shift_expression(
         return f"({col} + ({shift_days} * 86400))"
 
     if dialect in (None, "trino", "presto"):
-        if "iso_timestamp" in db_type or "timestamp_string" in db_type or "varchar" in db_type:
+        if (
+            "iso_timestamp" in db_type
+            or "timestamp_string" in db_type
+            or "varchar" in db_type
+        ):
             return f"CAST(date_add('day', {shift_days}, try_cast({col} AS TIMESTAMP)) AS VARCHAR)"
         if db_type == "date":
             return f"CAST(date_add('day', {shift_days}, CAST({col} AS DATE)) AS DATE)"
@@ -763,10 +797,14 @@ def cast_money_to_numeric(
         if not _is_money_type(dtype):
             return None
         if dialect == "trino":
-            return f"CAST(REPLACE(REPLACE({col_sql}, '$', ''), ',', '') AS DECIMAL(19, 4))"
+            return (
+                f"CAST(REPLACE(REPLACE({col_sql}, '$', ''), ',', '') AS DECIMAL(19, 4))"
+            )
         return f"CAST({col_sql} AS NUMERIC)"
 
-    return _wrap_tables_with_ctes(sql_query, table_schema_map, dialect, "__numeric", to_numeric)
+    return _wrap_tables_with_ctes(
+        sql_query, table_schema_map, dialect, "__numeric", to_numeric
+    )
 
 
 def _wrap_tables_with_ctes(
@@ -800,7 +838,9 @@ def _wrap_tables_with_ctes(
             continue
 
         full_table_name = exp.table_(
-            table_node.name, db=table_node.db or None, catalog=table_node.catalog or None
+            table_node.name,
+            db=table_node.db or None,
+            catalog=table_node.catalog or None,
         ).sql(dialect=dialect)
         cte_key = full_table_name.lower()
 
@@ -812,7 +852,9 @@ def _wrap_tables_with_ctes(
             for col, dtype in schema_dict.items():
                 # Postgres folds unquoted names to lower case
                 quote = dialect in ("postgres", "redshift") and not col.islower()
-                col_sql = exp.to_identifier(col, quoted=quote or None).sql(dialect=dialect)
+                col_sql = exp.to_identifier(col, quoted=quote or None).sql(
+                    dialect=dialect
+                )
                 new_expr = rewrite_column(col_sql, dtype)
                 if new_expr is None:
                     select_parts.append(col_sql)
@@ -827,11 +869,14 @@ def _wrap_tables_with_ctes(
                 cte_query_ast = sqlglot.parse_one(cte_query_str, read=dialect)
             except Exception as exc:
                 logger.error(
-                    "sql_comparison_utils.cte_parse_failed", table=table_name, error=str(exc)
+                    "sql_comparison_utils.cte_parse_failed",
+                    table=table_name,
+                    error=str(exc),
                 )
                 continue
             wrapped_ctes[cte_key] = exp.CTE(
-                this=cte_query_ast, alias=exp.TableAlias(this=exp.to_identifier(cte_name))
+                this=cte_query_ast,
+                alias=exp.TableAlias(this=exp.to_identifier(cte_name)),
             )
 
         cte = wrapped_ctes[cte_key]
@@ -930,7 +975,9 @@ async def compare_with_order_policy(
     if score < 1.0 or details.get("inconclusive") or details.get("empty_result"):
         return score, details
 
-    order_keys = order_key_indices(expected_sql, expected_result.columns, context.dialect)
+    order_keys = order_key_indices(
+        expected_sql, expected_result.columns, context.dialect
+    )
     ordered_score, _ = compare_results(
         expected_result,
         generated_result,
@@ -955,7 +1002,9 @@ async def compare_with_order_policy(
         details["reason"] = "row_order_mismatch"
         return 0.0, details
     if decision is not None and decision.requires_order is False:
-        details["order_policy"] = "order differs; the question does not ask for an order"
+        details["order_policy"] = (
+            "order differs; the question does not ask for an order"
+        )
         return score, details
     details["order_policy"] = "order differs; not verified (order judge unavailable)"
     details["order_not_verified"] = True
@@ -1017,7 +1066,9 @@ async def evaluate_execution_match(
             error=getattr(context.expected_result, "error", None),
         )
     if has_no_data(context.expected_result):
-        return EvaluationResult.not_applicable(evaluator_name, "golden_result_has_no_data")
+        return EvaluationResult.not_applicable(
+            evaluator_name, "golden_result_has_no_data"
+        )
     if not context.generated_sql and context.generated_result is None:
         return EvaluationResult(
             evaluator_name=evaluator_name,

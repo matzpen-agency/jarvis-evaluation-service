@@ -51,7 +51,10 @@ from typing import Any
 
 import httpx
 
-from src.domain.evaluators.sql_comparison_utils import clean_name
+from src.domain.evaluators.sql_comparison_utils import (
+    clean_name,
+    dataverse_table_name,
+)
 from src.infrastructure.bird.load_bird_databases import (
     DATABASES_DIR,
     _batches,
@@ -119,16 +122,21 @@ class SourcePlan:
 
     @property
     def english_name(self) -> str:
-        return dataverse_table(self.db_id, self.table)
+        return dataverse_table_name(self.db_id, self.table)
+
+    @property
+    def record_name(self) -> str:
+        # Avro type names allow no hyphens, unlike the kebab-case source name
+        return f"{clean_name(self.db_id)}_{clean_name(self.table)}"
 
     @property
     def trino_table(self) -> str:
-        return f'dataverse."{TRINO_SCHEMA}".{self.english_name}'
+        return f'dataverse."{TRINO_SCHEMA}"."{self.english_name}"'
 
     def avro_schema(self) -> dict:
         return {
             "type": "record",
-            "name": self.english_name,
+            "name": self.record_name,
             "namespace": "bird",
             "fields": [
                 {"name": field, "type": ["null", _AVRO_TYPES[kind]], "default": None}
@@ -138,11 +146,6 @@ class SourcePlan:
 
 
 # ── Names ─────────────────────────────────────────────────────────────────────
-
-
-def dataverse_table(db_id: str, table: str) -> str:
-    """The source's English name, which dataverse uses as its table name."""
-    return f"{clean_name(db_id)}__{clean_name(table)}"
 
 
 def field_names(columns: list[str]) -> dict[str, str]:

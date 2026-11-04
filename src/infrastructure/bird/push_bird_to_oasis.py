@@ -27,8 +27,9 @@ Fill in X_API_TOKEN and POOL_ID below (or set OASIS_API_TOKEN / OASIS_POOL_ID)
 and don't commit them. Both steps can be re-run: what was done is kept in the
 state file (--state, oasis_bird_sources.json), so sources aren't created twice
 and pushing continues from the last batch sent. The state file also maps every
-BIRD table and column to its dataverse name. --dry-run prints the requests
-without sending anything.
+BIRD table and column to its dataverse name. --destination takes a JSON
+file with the sources' destination, which Oasis requires (e.g. its our-s3
+storage). --dry-run prints the requests without sending anything.
 """
 
 # ruff: noqa: RUF001, RUF002 — Hebrew letters are intended here
@@ -282,7 +283,7 @@ def row_count(path: Path, plan: SourcePlan) -> int:
 # ── Oasis ─────────────────────────────────────────────────────────────────────
 
 
-def source_body(plan: SourcePlan, hebrew: str) -> dict:
+def source_body(plan: SourcePlan, hebrew: str, destination: dict | None = None) -> dict:
     return {
         "is-flowing": True,
         "properties": {
@@ -295,7 +296,7 @@ def source_body(plan: SourcePlan, hebrew: str) -> dict:
             "schema": json.dumps(plan.avro_schema(), ensure_ascii=False),
             "data-structure": "STRUCTURED",
         },
-        "destination": {"destinations": []},
+        "destination": destination or {"destinations": []},
         "transformations": {"transformations": []},
         "alerts": ALERTS,
     }
@@ -352,13 +353,14 @@ def create_sources(
     token: str,
     pool_id: str,
     dry_run: bool = False,
+    destination: dict | None = None,
 ) -> None:
     headers = {"x-api-token": token}
     used = {s["hebrew_name"] for s in state.sources.values()}
     for plan in plans:
         if plan.key in state.sources:
             continue
-        body = source_body(plan, hebrew_name(plan, used))
+        body = source_body(plan, hebrew_name(plan, used), destination)
         if dry_run:
             _show(f"{OASIS_URL}/metro/api/sources/push", body)
             continue
@@ -429,6 +431,15 @@ def push_rows(
     return missing
 
 
+def read_destination(path: Path) -> dict:
+    """
+    The source's "destination" from a JSON file: either the whole object
+    {"destinations": [...]} or just the list of destinations.
+    """
+    value = json.loads(path.read_text(encoding="utf-8"))
+    return {"destinations": value} if isinstance(value, list) else value
+
+
 def read_tokens(path: Path) -> dict[str, str]:
     text = path.read_text(encoding="utf-8")
     if path.suffix.lower() == ".csv":
@@ -465,6 +476,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--insecure", action="store_true", help="don't verify HTTPS")
     parser.add_argument(
+        "--destination",
+        type=Path,
+        help="create: JSON file with the sources' destination (e.g. our-s3)",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="print the requests only"
     )
     args = parser.parse_args(argv)
@@ -491,8 +507,17 @@ def main(argv: list[str] | None = None) -> None:
                 parser.error(
                     "set X_API_TOKEN and POOL_ID in the script (or OASIS_API_TOKEN / OASIS_POOL_ID)"
                 )
+            destination = (
+                read_destination(args.destination) if args.destination else None
+            )
             create_sources(
-                client, plans, state, token, pool_id or "<POOL_ID>", args.dry_run
+                client,
+                plans,
+                state,
+                token,
+                pool_id or "<POOL_ID>",
+                args.dry_run,
+                destination,
             )
         else:
             if not args.tokens and not args.dry_run:

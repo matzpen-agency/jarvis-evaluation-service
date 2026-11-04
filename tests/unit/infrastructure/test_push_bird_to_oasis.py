@@ -118,3 +118,31 @@ def test_push_continues_after_the_last_batch_sent(database, tmp_path):
 
     oasis.push_rows(client, {"shop": database}, plans, state, {"shop.orders": "t"}, 500)
     assert [len(batch) for _, batch in fake.pushed] == [1]
+
+
+def test_destination_comes_from_a_file(database, tmp_path):
+    plan = oasis.plan_database(database)[0]
+    assert oasis.source_body(plan, "x")["destination"] == {"destinations": []}
+
+    entry = {"type": "our-s3", "name": "bird"}
+    as_list = tmp_path / "list.json"
+    as_list.write_text(json.dumps([entry]))
+    as_object = tmp_path / "object.json"
+    as_object.write_text(json.dumps({"destinations": [entry]}))
+    for path in (as_list, as_object):
+        destination = oasis.read_destination(path)
+        assert destination == {"destinations": [entry]}
+        assert oasis.source_body(plan, "x", destination)["destination"] == destination
+
+    fake = FakeOasis()
+    client = httpx.Client(transport=httpx.MockTransport(fake))
+    state = oasis.State(tmp_path / "state.json")
+    oasis.create_sources(
+        client,
+        [plan],
+        state,
+        "api-token",
+        "pool-1",
+        destination={"destinations": [entry]},
+    )
+    assert fake.created[0]["destination"] == {"destinations": [entry]}

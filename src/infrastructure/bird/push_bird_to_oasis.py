@@ -23,7 +23,8 @@ Oasis UI:
 Give that bundle's schemas/ folder as --schemas-dir so the column types are
 the ones its Trino gold SQL was converted for.
 
-Fill in X_API_TOKEN and POOL_ID below (or set OASIS_API_TOKEN / OASIS_POOL_ID)
+Fill in X_API_TOKEN and POOL_ID below (or set OASIS_API_TOKEN / OASIS_POOL_ID;
+OASIS_DATA_FACTORY / OASIS_PROJECT override the data factory and project ids)
 and don't commit them. Both steps can be re-run: what was done is kept in the
 state file (--state, oasis_bird_sources.json), so sources aren't created twice
 and pushing continues from the last batch sent. The state file also maps every
@@ -79,14 +80,19 @@ PUSH_URL = "https://push-data-metro-pipeline.south.metro.idf.cts/api/v1/push"
 POOL_NAME = "bird-public-benchmark"
 TRINO_SCHEMA = f"agency__{POOL_NAME}"
 
-DATA_FACTORY = "ecc92565-16cd-44e0-b3ac-083e11165c72"
+# The project must belong to the data factory, or Oasis answers 422
+# "could not find project in data factory"
+DATA_FACTORY = os.environ.get(
+    "OASIS_DATA_FACTORY", "ecc92565-16cd-44e0-b3ac-083e11165c72"
+)
+PROJECT = os.environ.get("OASIS_PROJECT", "152def03-d7e7-489e-bac5-a286f9e15c4f")
 PROPERTIES = {
     "data-permission": {
         "permission-type": "restricted",
         "source-shared-data-factories": [{"id": DATA_FACTORY, "name": "string"}],
     },
     "data-factory": DATA_FACTORY,
-    "project": "152def03-d7e7-489e-bac5-a286f9e15c4f",
+    "project": PROJECT,
     "operational-contact": "agency",
     "operational-data-factory": "agency",
     "site": "south",

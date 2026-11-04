@@ -27,9 +27,9 @@ Fill in X_API_TOKEN and POOL_ID below (or set OASIS_API_TOKEN / OASIS_POOL_ID)
 and don't commit them. Both steps can be re-run: what was done is kept in the
 state file (--state, oasis_bird_sources.json), so sources aren't created twice
 and pushing continues from the last batch sent. The state file also maps every
-BIRD table and column to its dataverse name. --destination takes a JSON
-file with the sources' destination, which Oasis requires (e.g. its our-s3
-storage). --dry-run prints the requests without sending anything.
+BIRD table and column to its dataverse name. The sources go to
+Oasis's our-s3 destination (DESTINATION); --destination takes a JSON file to
+send another one. --dry-run prints the requests without sending anything.
 """
 
 # ruff: noqa: RUF001, RUF002 — Hebrew letters are intended here
@@ -89,6 +89,12 @@ PROPERTIES = {
     "operational-contact": "agency",
     "operational-data-factory": "agency",
     "site": "south",
+}
+# Where the source's data goes; dataverse reads it from Oasis's own S3
+DESTINATION = {
+    "destinations": [
+        {"type": "our-s3", "partition-field": "_metro_insersion_ts"},
+    ]
 }
 ALERTS = {
     "alert-types": ["error"],
@@ -296,7 +302,7 @@ def source_body(plan: SourcePlan, hebrew: str, destination: dict | None = None) 
             "schema": json.dumps(plan.avro_schema(), ensure_ascii=False),
             "data-structure": "STRUCTURED",
         },
-        "destination": destination or {"destinations": []},
+        "destination": destination or DESTINATION,
         "transformations": {"transformations": []},
         "alerts": ALERTS,
     }
@@ -478,7 +484,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--destination",
         type=Path,
-        help="create: JSON file with the sources' destination (e.g. our-s3)",
+        help="create: JSON file with another destination than our-s3",
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="print the requests only"

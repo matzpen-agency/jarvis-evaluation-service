@@ -122,7 +122,9 @@ def test_push_continues_after_the_last_batch_sent(database, tmp_path):
 
 def test_destination_comes_from_a_file(database, tmp_path):
     plan = oasis.plan_database(database)[0]
-    assert oasis.source_body(plan, "x")["destination"] == {"destinations": []}
+    assert oasis.source_body(plan, "x")["destination"] == {
+        "destinations": [{"type": "our-s3", "partition-field": "_metro_insersion_ts"}]
+    }
 
     entry = {"type": "our-s3", "name": "bird"}
     as_list = tmp_path / "list.json"

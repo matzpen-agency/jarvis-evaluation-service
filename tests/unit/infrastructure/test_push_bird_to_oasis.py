@@ -79,6 +79,17 @@ def test_create_then_push(database, tmp_path):
         "string",
     ]
     assert "map" not in orders["schema"]["schema"]
+    # Oasis's own schema format: id, path and originalName everywhere
+    assert "namespace" not in schema and schema["path"] == ""
+    assert schema["fields"][0] == {
+        "path": "order_id",
+        "originalName": "order_id",
+        "name": "order_id",
+        "id": schema["fields"][0]["id"],
+        "type": ["null", "long"],
+    }
+    ids = [schema["id"], *(f["id"] for f in schema["fields"])]
+    assert len(set(ids)) == len(ids)
     assert fake.pools == [("/catalog/api/pools/pool-1/sources", ["src-1", "src-2"])]
     assert state.sources["shop.orders"]["trino_table"] == (
         'dataverse."agency__bird-public-benchmark"."shop-orders"'

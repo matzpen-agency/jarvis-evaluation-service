@@ -45,6 +45,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -141,15 +142,34 @@ class SourcePlan:
         return f'dataverse."{TRINO_SCHEMA}"."{self.english_name}"'
 
     def avro_schema(self) -> dict:
+        """
+        The schema in Oasis's own format (as its API returns a source's schema):
+        every record and field has an id, a path and an originalName; no
+        namespace and no defaults. Ids are fixed per table/column, so a dry run
+        shows what create sends.
+        """
         return {
             "type": "record",
             "name": self.record_name,
-            "namespace": "bird",
+            "doc": "",
+            "originalName": self.record_name,
+            "id": _schema_id(self.key),
+            "path": "",
             "fields": [
-                {"name": field, "type": ["null", _AVRO_TYPES[kind]], "default": None}
+                {
+                    "path": field,
+                    "originalName": field,
+                    "name": field,
+                    "id": _schema_id(f"{self.key}.{field}"),
+                    "type": ["null", _AVRO_TYPES[kind]],
+                }
                 for field, kind in zip(self.columns.values(), self.kinds, strict=True)
             ],
         }
+
+
+def _schema_id(name: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"bird-public-benchmark/{name}"))
 
 
 # ── Names ─────────────────────────────────────────────────────────────────────

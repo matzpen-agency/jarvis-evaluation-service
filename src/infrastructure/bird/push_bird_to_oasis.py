@@ -356,16 +356,18 @@ class State:
         tmp.replace(self.path)
 
 
-def _post(client: httpx.Client, url: str, body: Any, headers: dict) -> httpx.Response:
-    for attempt in range(4):
+def _post(
+    client: httpx.Client, url: str, body: Any, headers: dict, tries: int = 4
+) -> httpx.Response:
+    for attempt in range(tries):
         try:
             response = client.post(url, json=body, headers=headers)
         except httpx.TransportError as exc:
-            if attempt == 3:
+            if attempt == tries - 1:
                 raise
             _say(f"    {exc!r}, retrying")
         else:
-            if response.status_code < 500 or attempt == 3:
+            if response.status_code < 500 or attempt == tries - 1:
                 if response.is_error:
                     raise RuntimeError(
                         f"POST {url} → {response.status_code}: {response.text[:1000]}"
@@ -380,6 +382,9 @@ def _show(url: str, body: Any) -> None:
     _say(f"POST {url}\n{json.dumps(body, indent=2, ensure_ascii=False)}")
 
 
+_NAME_TAKEN = re.compile(r"→ 422.*(unique|ייחודי)", re.IGNORECASE | re.DOTALL)
+
+
 def create_sources(
     client: httpx.Client,
     plans: list[SourcePlan],
@@ -388,9 +393,11 @@ def create_sources(
     pool_id: str,
     dry_run: bool = False,
     destination: dict | None = None,
-) -> None:
+) -> list[str]:
+    """Create the missing sources; returns those whose name Oasis already has."""
     headers = {"x-api-token": token}
     used = {s["hebrew_name"] for s in state.sources.values()}
+    taken: list[str] = []
     for plan in plans:
         if plan.key in state.sources:
             continue
@@ -398,7 +405,22 @@ def create_sources(
         if dry_run:
             _show(f"{OASIS_URL}/metro/api/sources/push", body)
             continue
-        response = _post(client, f"{OASIS_URL}/metro/api/sources/push", body, headers)
+        # Once only: a create that fails with a 5xx may still have made the
+        # source, and trying again would then be refused as a duplicate
+        try:
+            response = _post(
+                client,
+                f"{OASIS_URL}/metro/api/sources/push",
+                body,
+                headers,
+                tries=1,
+            )
+        except RuntimeError as exc:
+            if not _NAME_TAKEN.search(str(exc)):
+                raise
+            _say(f"NAME TAKEN {plan.key} ({plan.english_name}): {exc}")
+            taken.append(plan.english_name)
+            continue
         source_id = response.json()["sourceId"]
         state.sources[plan.key] = {
             "source_id": source_id,
@@ -415,16 +437,17 @@ def create_sources(
 
     new = [s["source_id"] for s in state.sources.values() if not s["in_pool"]]
     if not new:
-        return
+        return taken
     url = f"{OASIS_URL}/catalog/api/pools/{pool_id}/sources"
     if dry_run:
         _show(url, new)
-        return
+        return taken
     _post(client, url, new, headers)
     for s in state.sources.values():
         s["in_pool"] = True
     state.save()
     _say(f"added {len(new)} sources to pool {pool_id}")
+    return taken
 
 
 def push_rows(
@@ -544,7 +567,7 @@ def main(argv: list[str] | None = None) -> None:
             destination = (
                 read_destination(args.destination) if args.destination else None
             )
-            create_sources(
+            taken = create_sources(
                 client,
                 plans,
                 state,
@@ -553,6 +576,13 @@ def main(argv: list[str] | None = None) -> None:
                 args.dry_run,
                 destination,
             )
+            if taken:
+                _say(
+                    f"{len(taken)} names already exist in Oasis and were not created. "
+                    "Delete those sources in Oasis and run create again (the rest "
+                    "are kept):\n  " + "\n  ".join(taken)
+                )
+                sys.exit(1)
         else:
             if not args.tokens and not args.dry_run:
                 parser.error("push needs --tokens")

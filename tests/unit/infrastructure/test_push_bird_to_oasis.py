@@ -159,3 +159,46 @@ def test_destination_comes_from_a_file(database, tmp_path):
         destination={"destinations": [entry]},
     )
     assert fake.created[0]["destination"] == {"destinations": [entry]}
+
+
+def test_a_name_oasis_already_has_is_reported_and_the_rest_are_created(
+    database, tmp_path
+):
+    fake = FakeOasis()
+    attempts = []
+
+    def oasis_with_a_leftover(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/metro/api/sources/push":
+            name = json.loads(request.content)["properties"]["english-source-name"]
+            attempts.append(name)
+            if name == "shop-customers":
+                return httpx.Response(
+                    422, json={"message": "english source name must be unique"}
+                )
+        return fake(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(oasis_with_a_leftover))
+    plans = oasis.plan_database(database)
+    state = oasis.State(tmp_path / "state.json")
+
+    taken = oasis.create_sources(client, plans, state, "api-token", "pool-1")
+
+    assert taken == ["shop-customers"]
+    assert attempts.count("shop-customers") == 1
+    assert list(state.sources) == ["shop.orders"]
+    assert fake.pools == [("/catalog/api/pools/pool-1/sources", ["src-1"])]
+
+
+def test_create_stops_on_other_errors_without_retrying(database, tmp_path):
+    calls = []
+
+    def broken(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(500, text="boom")
+
+    client = httpx.Client(transport=httpx.MockTransport(broken))
+    plans = oasis.plan_database(database)
+    state = oasis.State(tmp_path / "state.json")
+    with pytest.raises(RuntimeError, match="500"):
+        oasis.create_sources(client, plans, state, "api-token", "pool-1")
+    assert len(calls) == 1

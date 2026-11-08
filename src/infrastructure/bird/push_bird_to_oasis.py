@@ -93,7 +93,6 @@ PROPERTIES = {
     },
     "data-factory": DATA_FACTORY,
     "project": PROJECT,
-    "operational-contact": "agency",
     "operational-data-factory": "agency",
     "site": "south",
 }

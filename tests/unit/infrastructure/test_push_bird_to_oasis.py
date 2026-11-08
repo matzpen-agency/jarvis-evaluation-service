@@ -202,3 +202,27 @@ def test_create_stops_on_other_errors_without_retrying(database, tmp_path):
     with pytest.raises(RuntimeError, match="500"):
         oasis.create_sources(client, plans, state, "api-token", "pool-1")
     assert len(calls) == 1
+
+
+def test_create_and_push_log_every_table(database, tmp_path, capsys):
+    fake = FakeOasis()
+    client = httpx.Client(transport=httpx.MockTransport(fake))
+    plans = oasis.plan_database(database)
+    state = oasis.State(tmp_path / "state.json")
+
+    oasis.create_sources(client, plans, state, "api-token", "pool-1")
+    out = capsys.readouterr().out
+    assert "[1/2] shop.customers: creating shop-customers" in out or (
+        "[1/2] shop.orders: creating shop-orders" in out
+    )
+    assert "created src-1 in " in out
+    assert "pool: added 2 sources to pool pool-1" in out
+
+    oasis.create_sources(client, plans, state, "api-token", "pool-1")
+    assert "already created, skipping" in capsys.readouterr().out
+
+    oasis.push_rows(client, {"shop": database}, plans, state, {"src-1": "t"}, 2)
+    out = capsys.readouterr().out
+    assert "no Source-Access-Token, skipping" in out
+    assert "2/3 rows" in out and "3/3 rows" in out
+    assert "push: finished, 1 tables not pushed" in out

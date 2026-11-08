@@ -78,6 +78,7 @@ POOL_ID = ""
 OASIS_URL = "https://oasis.idf.cts"
 PUSH_URL = "https://push-data-metro-pipeline.south.metro.idf.cts/api/v1/push"
 POOL_NAME = "bird-public-benchmark"
+TIMEOUT = 120  # seconds to wait for each Oasis request
 TRINO_SCHEMA = f"agency__{POOL_NAME}"
 
 # The project must belong to the data factory, or Oasis answers 422
@@ -378,6 +379,10 @@ def _post(
     raise AssertionError("unreachable")
 
 
+def _log(message: str) -> None:
+    _say(f"{time.strftime('%H:%M:%S')} {message}")
+
+
 def _show(url: str, body: Any) -> None:
     _say(f"POST {url}\n{json.dumps(body, indent=2, ensure_ascii=False)}")
 
@@ -398,13 +403,19 @@ def create_sources(
     headers = {"x-api-token": token}
     used = {s["hebrew_name"] for s in state.sources.values()}
     taken: list[str] = []
-    for plan in plans:
+    created = 0
+    _log(f"create: {len(plans)} tables, {len(state.sources)} already in the state file")
+    for n, plan in enumerate(plans, 1):
+        step = f"[{n}/{len(plans)}] {plan.key}"
         if plan.key in state.sources:
+            _log(f"{step}: already created, skipping")
             continue
         body = source_body(plan, hebrew_name(plan, used), destination)
         if dry_run:
             _show(f"{OASIS_URL}/metro/api/sources/push", body)
             continue
+        _log(f"{step}: creating {plan.english_name} (waits up to {TIMEOUT}s)...")
+        started = time.monotonic()
         # Once only: a create that fails with a 5xx may still have made the
         # source, and trying again would then be refused as a duplicate
         try:
@@ -417,10 +428,14 @@ def create_sources(
             )
         except RuntimeError as exc:
             if not _NAME_TAKEN.search(str(exc)):
+                _log(f"{step}: FAILED after {time.monotonic() - started:.1f}s")
                 raise
-            _say(f"NAME TAKEN {plan.key} ({plan.english_name}): {exc}")
+            _log(f"{step}: NAME TAKEN ({plan.english_name}): {exc}")
             taken.append(plan.english_name)
             continue
+        except httpx.TransportError as exc:
+            _log(f"{step}: FAILED after {time.monotonic() - started:.1f}s: {exc!r}")
+            raise
         source_id = response.json()["sourceId"]
         state.sources[plan.key] = {
             "source_id": source_id,
@@ -433,20 +448,25 @@ def create_sources(
             "done": False,
         }
         state.save()
-        _say(f"created {plan.key} → {source_id}")
+        created += 1
+        _log(f"{step}: created {source_id} in {time.monotonic() - started:.1f}s")
+
+    _log(f"create: {created} created, {len(taken)} names taken")
 
     new = [s["source_id"] for s in state.sources.values() if not s["in_pool"]]
     if not new:
+        _log("pool: nothing new to add")
         return taken
     url = f"{OASIS_URL}/catalog/api/pools/{pool_id}/sources"
     if dry_run:
         _show(url, new)
         return taken
+    _log(f"pool: adding {len(new)} sources to pool {pool_id}...")
     _post(client, url, new, headers)
     for s in state.sources.values():
         s["in_pool"] = True
     state.save()
-    _say(f"added {len(new)} sources to pool {pool_id}")
+    _log(f"pool: added {len(new)} sources to pool {pool_id}")
     return taken
 
 
@@ -461,19 +481,25 @@ def push_rows(
 ) -> list[str]:
     """Push every table's rows; returns the tables skipped for a missing token."""
     missing = []
-    for plan in plans:
+    _log(f"push: {len(plans)} tables, {batch_size} rows per request")
+    for n, plan in enumerate(plans, 1):
+        step = f"[{n}/{len(plans)}] {plan.key}"
         source = state.sources.get(plan.key)
         if source is None:
+            _log(f"{step}: no source yet, skipping (run create first)")
             missing.append(f"{plan.key} (no source yet, run create first)")
             continue
         if source["done"]:
+            _log(f"{step}: already pushed, skipping")
             continue
         token = tokens.get(source["source_id"]) or tokens.get(plan.key)
         if not token and not dry_run:
+            _log(f"{step}: no Source-Access-Token, skipping")
             missing.append(plan.key)
             continue
         path = paths[plan.db_id]
         total = row_count(path, plan)
+        _log(f"{step}: pushing from row {source['pushed_rows']} of {total}...")
         for batch in _batches(records(path, plan, source["pushed_rows"]), batch_size):
             if dry_run:
                 _show(PUSH_URL, batch[:2])
@@ -481,10 +507,12 @@ def push_rows(
             _post(client, PUSH_URL, batch, {"Source-Access-Token": token})
             source["pushed_rows"] += len(batch)
             state.save()
-            _say(f"{plan.key}: {source['pushed_rows']}/{total} rows")
+            _log(f"{step}: {source['pushed_rows']}/{total} rows")
         if not dry_run:
             source["done"] = True
             state.save()
+            _log(f"{step}: done")
+    _log(f"push: finished, {len(missing)} tables not pushed")
     return missing
 
 
@@ -547,16 +575,15 @@ def main(argv: list[str] | None = None) -> None:
     if absent := sorted(set(db_ids) - set(found)):
         parser.error(f"not in {args.databases_dir}: {', '.join(absent)}")
     paths = {d: found[d] for d in db_ids}
-    plans = [
-        plan
-        for d in db_ids
-        for plan in plan_database(paths[d], bundle_types(args.schemas_dir, d), d)
-    ]
-    _say(f"{len(db_ids)} databases, {len(plans)} tables")
+    plans = []
+    for d in db_ids:
+        _log(f"reading the tables of {d}...")
+        plans += plan_database(paths[d], bundle_types(args.schemas_dir, d), d)
+    _log(f"{len(db_ids)} databases, {len(plans)} tables")
 
     state = State(args.state)
     verify: bool | str = False if args.insecure else (args.ca_bundle or True)
-    with httpx.Client(verify=verify, timeout=120) as client:
+    with httpx.Client(verify=verify, timeout=TIMEOUT) as client:
         if args.step == "create":
             token = os.environ.get("OASIS_API_TOKEN", X_API_TOKEN)
             pool_id = os.environ.get("OASIS_POOL_ID", POOL_ID)

@@ -26,6 +26,7 @@ from src.infrastructure.bird.load_bird_databases import (
     bundle_types,
     find_databases,
     read_tables,
+    use_clean_names,
 )
 from src.infrastructure.bird.verify_bird_questions import gold_sql_for
 
@@ -258,3 +259,26 @@ def test_bundle_layout_and_types(tmp_path, shop):
         ("credit ($)", "double"),
         ("city", "text"),
     ]
+
+
+@pytest.mark.unit
+def test_clean_names_match_the_push_script_and_rename_the_keys(tmp_path):
+    path = tmp_path / "shop.sqlite"
+    con = sqlite3.connect(path)
+    con.execute('CREATE TABLE "Parent" ("Parent ID" INTEGER PRIMARY KEY)')
+    con.execute(
+        'CREATE TABLE child ("Total ($)" REAL, "Parent Ref" INTEGER '
+        'REFERENCES Parent("Parent ID"))'
+    )
+    con.commit()
+
+    tables = read_tables(con)
+    use_clean_names(tables)
+    plans = {p.table: p for p in oasis.plan_database(path)}
+    for table in tables:
+        assert [c.name for c in table.columns] == list(
+            plans[table.name].columns.values()
+        )
+    by_name = {t.name: t for t in tables}
+    assert by_name["parent"].primary_key == ["parent_id"]
+    assert by_name["child"].foreign_keys == [(["parent_ref"], "parent", ["parent_id"])]

@@ -29,6 +29,10 @@ schema after its db_id, as that gold SQL expects:
     python -m src.infrastructure.bird.load_bird_databases --target postgres \\
         --dsn postgresql://... --databases-dir bundle/databases \\
         --schemas-dir bundle/schemas --schema-prefix ""
+
+--clean-names gives the Postgres columns the names the dataverse tables use
+("county name" → county_name): what a Metro pull source reads from Postgres
+then matches the gold SQL written for dataverse.
 """
 
 from __future__ import annotations
@@ -180,6 +184,26 @@ def read_tables(
     return tables
 
 
+def use_clean_names(tables: list[Table]) -> None:
+    """Rename every column, key included, to its dataverse (Avro field) name."""
+    from src.infrastructure.bird.push_bird_to_oasis import field_names
+
+    names = {t.name: field_names([c.name for c in t.columns]) for t in tables}
+    for table in tables:
+        renamed = names[table.name]
+        for column in table.columns:
+            column.name = renamed[column.name]
+        table.primary_key = [renamed[c] for c in table.primary_key]
+        table.foreign_keys = [
+            (
+                [renamed[c] for c in cols],
+                ref_table,
+                [names.get(ref_table, {}).get(c, c) for c in ref_cols],
+            )
+            for cols, ref_table, ref_cols in table.foreign_keys
+        ]
+
+
 def read_rows(con: sqlite3.Connection, original_name: str) -> Iterator[tuple]:
     yield from con.execute(f'SELECT * FROM "{original_name}"')
 
@@ -276,11 +300,14 @@ def load_into_postgres(
     log=None,
     types: dict[str, dict[str, str]] | None = None,
     batch_size: int = 10_000,
+    clean_names: bool = False,
 ) -> None:
     log = log or _say
     from psycopg2.extras import execute_values
 
     tables = read_tables(con, types)
+    if clean_names:
+        use_clean_names(tables)
     originals = _original_names(con)
     with pg.cursor() as cur:
         cur.execute(f"DROP SCHEMA IF EXISTS {_ident(schema)} CASCADE")
@@ -416,6 +443,11 @@ def main(argv: list[str] | None = None) -> None:
         type=Path,
         help="t2s_bird_trino_he schemas/ folder: take the column types from it",
     )
+    parser.add_argument(
+        "--clean-names",
+        action="store_true",
+        help="target postgres: name the columns as the dataverse tables do",
+    )
     args = parser.parse_args(argv)
 
     paths = find_databases(args.databases_dir)
@@ -446,7 +478,9 @@ def main(argv: list[str] | None = None) -> None:
             if args.target == "trino":
                 load_into_trino(cursor, args.catalog, schema, con, types=types)
             else:
-                load_into_postgres(pg, schema, con, types=types)
+                load_into_postgres(
+                    pg, schema, con, types=types, clean_names=args.clean_names
+                )
         finally:
             con.close()
     _say(

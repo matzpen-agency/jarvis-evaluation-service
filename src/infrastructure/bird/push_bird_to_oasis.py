@@ -97,22 +97,15 @@ PROPERTIES = {
     "operational-data-factory": "agency",
     "site": "south",
 }
-# Where the source's data goes; dataverse reads it from Oasis's own S3.
-# Oasis wants the partition field to be one of the schema's fields, so every
-# table gets it as an extra field, set to the push time on every row.
-PARTITION_FIELD = "_metro_insersion_ts"
+# Where the source's data goes (S3 - Oasis Lake); dataverse reads it from there.
+# The partition field is the insertion time Oasis adds to every row itself, so
+# it is not in our schema; it must be named exactly as Oasis names it.
+PARTITION_FIELD = os.environ.get("OASIS_PARTITION_FIELD", "_metro_insertion_ts")
 DESTINATION = {
     "destinations": [
         {"type": "our-s3", "partition-field": PARTITION_FIELD},
     ]
 }
-# Its Avro type, as JSON; OASIS_PARTITION_TYPE='"string"' sends an ISO time
-# string and '"long"' plain epoch milliseconds instead
-PARTITION_TYPE = json.loads(
-    os.environ.get(
-        "OASIS_PARTITION_TYPE", '{"type": "long", "logicalType": "timestamp-millis"}'
-    )
-)
 ALERTS = {
     "alert-types": ["error"],
     "alerts-interval": "5",
@@ -180,15 +173,6 @@ class SourcePlan:
                     "type": ["null", _AVRO_TYPES[kind]],
                 }
                 for field, kind in zip(self.columns.values(), self.kinds, strict=True)
-            ]
-            + [
-                {
-                    "path": PARTITION_FIELD,
-                    "originalName": PARTITION_FIELD,
-                    "name": PARTITION_FIELD,
-                    "id": _schema_id(f"{self.key}.{PARTITION_FIELD}"),
-                    "type": PARTITION_TYPE,
-                }
             ],
         }
 
@@ -307,22 +291,16 @@ def _value(value: Any, kind: str) -> Any:
     return value
 
 
-def records(
-    path: Path, plan: SourcePlan, skip: int = 0, pushed_at: Any = None
-) -> Iterator[dict]:
-    """The table's rows as Avro records; pushed_at fills PARTITION_FIELD."""
+def records(path: Path, plan: SourcePlan, skip: int = 0) -> Iterator[dict]:
     con = open_database(path)
     try:
         fields = list(plan.columns.values())
         for row in con.execute(
             f'SELECT * FROM "{plan.original_table}" LIMIT -1 OFFSET ?', (skip,)
         ):
-            record = {
+            yield {
                 f: _value(v, k) for f, v, k in zip(fields, row, plan.kinds, strict=True)
             }
-            if pushed_at is not None:
-                record[PARTITION_FIELD] = pushed_at
-            yield record
     finally:
         con.close()
 
@@ -450,13 +428,6 @@ def create_sources(
     _say(f"added {len(new)} sources to pool {pool_id}")
 
 
-def push_time() -> Any:
-    """Now, as PARTITION_TYPE wants it."""
-    if PARTITION_TYPE == "string":
-        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    return int(time.time() * 1000)
-
-
 def push_rows(
     client: httpx.Client,
     paths: dict[str, Path],
@@ -481,8 +452,7 @@ def push_rows(
             continue
         path = paths[plan.db_id]
         total = row_count(path, plan)
-        rows = records(path, plan, source["pushed_rows"], push_time())
-        for batch in _batches(rows, batch_size):
+        for batch in _batches(records(path, plan, source["pushed_rows"]), batch_size):
             if dry_run:
                 _show(PUSH_URL, batch[:2])
                 break

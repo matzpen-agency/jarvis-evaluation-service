@@ -71,19 +71,8 @@ def test_create_then_push(database, tmp_path):
     assert orders["is-flowing"] is True
     assert orders["properties"]["english-source-name"] == "shop-orders"
     schema = json.loads(orders["schema"]["schema"])
-    assert [f["name"] for f in schema["fields"]] == [
-        "order_id",
-        "total",
-        "note",
-        "pic",
-        "_metro_insersion_ts",
-    ]
-    # the destination's partition field must be a schema field
-    assert schema["fields"][-1]["type"] == {
-        "type": "long",
-        "logicalType": "timestamp-millis",
-    }
-    assert [f["type"][1] for f in schema["fields"][:-1]] == [
+    assert [f["name"] for f in schema["fields"]] == ["order_id", "total", "note", "pic"]
+    assert [f["type"][1] for f in schema["fields"]] == [
         "long",
         "double",
         "string",
@@ -117,10 +106,6 @@ def test_create_then_push(database, tmp_path):
         client, {"shop": database}, plans, state, {"src-1": "tok-orders"}, batch_size=2
     )
     assert missing == ["shop.customers"]
-    pushed_at = {
-        r.pop("_metro_insersion_ts") for _, batch in fake.pushed for r in batch
-    }
-    assert len(pushed_at) == 1 and isinstance(pushed_at.pop(), int)
     assert fake.pushed == [
         (
             "tok-orders",
@@ -149,7 +134,7 @@ def test_push_continues_after_the_last_batch_sent(database, tmp_path):
 def test_destination_comes_from_a_file(database, tmp_path):
     plan = oasis.plan_database(database)[0]
     assert oasis.source_body(plan, "x")["destination"] == {
-        "destinations": [{"type": "our-s3", "partition-field": "_metro_insersion_ts"}]
+        "destinations": [{"type": "our-s3", "partition-field": "_metro_insertion_ts"}]
     }
 
     entry = {"type": "our-s3", "name": "bird"}

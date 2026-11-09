@@ -78,7 +78,8 @@ POOL_ID = ""
 OASIS_URL = "https://oasis.idf.cts"
 PUSH_URL = "https://push-data-metro-pipeline.south.metro.idf.cts/api/v1/push"
 POOL_NAME = "bird-public-benchmark"
-TIMEOUT = 120  # seconds to wait for each Oasis request
+# Seconds to wait for each answer; creating a source can take Oasis minutes
+TIMEOUT = int(os.environ.get("OASIS_TIMEOUT", "600"))
 TRINO_SCHEMA = f"agency__{POOL_NAME}"
 
 # The project must belong to the data factory, or Oasis answers 422
@@ -583,7 +584,9 @@ def main(argv: list[str] | None = None) -> None:
 
     state = State(args.state)
     verify: bool | str = False if args.insecure else (args.ca_bundle or True)
-    with httpx.Client(verify=verify, timeout=TIMEOUT) as client:
+    with httpx.Client(
+        verify=verify, timeout=httpx.Timeout(TIMEOUT, connect=30)
+    ) as client:
         if args.step == "create":
             token = os.environ.get("OASIS_API_TOKEN", X_API_TOKEN)
             pool_id = os.environ.get("OASIS_POOL_ID", POOL_ID)
@@ -623,5 +626,18 @@ def main(argv: list[str] | None = None) -> None:
     _say(f"State saved in {args.state}")
 
 
+def run(argv: list[str] | None = None) -> None:
+    """main(), with one clear message when Oasis doesn't answer."""
+    try:
+        main(argv)
+    except httpx.TimeoutException:
+        sys.exit(
+            f"Oasis did not answer within {TIMEOUT}s. It may still have created the "
+            "source of the last table logged above: check in Oasis and delete it if "
+            "it is there, then run the same command again. To wait longer: "
+            "export OASIS_TIMEOUT=1800"
+        )
+
+
 if __name__ == "__main__":
-    main()
+    run()

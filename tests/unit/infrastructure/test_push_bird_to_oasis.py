@@ -226,3 +226,23 @@ def test_create_and_push_log_every_table(database, tmp_path, capsys):
     assert "no Source-Access-Token, skipping" in out
     assert "2/3 rows" in out and "3/3 rows" in out
     assert "push: finished, 1 tables not pushed" in out
+
+
+def test_a_timeout_ends_with_one_clear_message(database, tmp_path, monkeypatch):
+    def no_answer(*args, **kwargs):
+        raise httpx.ReadTimeout("The read operation timed out")
+
+    monkeypatch.setattr(oasis, "create_sources", no_answer)
+    monkeypatch.setenv("OASIS_API_TOKEN", "t")
+    monkeypatch.setenv("OASIS_POOL_ID", "p")
+    with pytest.raises(SystemExit, match="did not answer within") as ended:
+        oasis.run(
+            [
+                "create",
+                "--databases-dir",
+                str(tmp_path),
+                "--state",
+                str(tmp_path / "state.json"),
+            ]
+        )
+    assert "delete it" in str(ended.value)

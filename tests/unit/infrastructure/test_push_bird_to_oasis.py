@@ -303,3 +303,14 @@ def test_tokens_list_with_name_and_source_key(tmp_path):
     )
     with pytest.raises(SystemExit, match="two different tokens"):
         oasis.read_tokens(path)
+
+
+def test_batches_stay_under_the_size_limit():
+    rows = [{"x": "a" * 100} for _ in range(10)]
+    row_size = len(json.dumps(rows[0])) + 1
+    batches = list(oasis._sized_batches(iter(rows), 500, 3 * row_size + 2))
+    assert [len(b) for b in batches] == [3, 3, 3, 1]
+    assert [len(b) for b in oasis._sized_batches(iter(rows), 4, 10**6)] == [4, 4, 2]
+    # a row bigger than the limit still goes, on its own
+    assert [len(b) for b in oasis._sized_batches(iter(rows), 500, 10)] == [1] * 10
+    assert all(len(json.dumps(b)) <= 3 * row_size + 2 for b in batches)

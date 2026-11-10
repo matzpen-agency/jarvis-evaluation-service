@@ -60,7 +60,6 @@ from src.domain.evaluators.sql_comparison_utils import (
 )
 from src.infrastructure.bird.load_bird_databases import (
     DATABASES_DIR,
-    _batches,
     _original_names,
     _say,
     bundle_types,
@@ -78,6 +77,8 @@ POOL_ID = ""
 OASIS_URL = "https://oasis.idf.cts"
 PUSH_URL = "https://push-data-metro-pipeline.south.metro.idf.cts/api/v1/push"
 POOL_NAME = "bird-public-benchmark"
+# The push endpoint refuses bodies over 11 MB; stay well under it
+MAX_BATCH_BYTES = 8 * 1024 * 1024
 # Seconds to wait for each answer; creating a source can take Oasis minutes
 TIMEOUT = int(os.environ.get("OASIS_TIMEOUT", "600"))
 TRINO_SCHEMA = f"agency__{POOL_NAME}"
@@ -471,6 +472,23 @@ def create_sources(
     return taken
 
 
+def _sized_batches(
+    rows: Iterator[dict], max_rows: int, max_bytes: int
+) -> Iterator[list[dict]]:
+    """Batches of at most max_rows rows and about max_bytes of JSON."""
+    batch: list[dict] = []
+    size = 2  # the list's brackets
+    for row in rows:
+        row_size = len(json.dumps(row).encode()) + 1
+        if batch and (len(batch) >= max_rows or size + row_size > max_bytes):
+            yield batch
+            batch, size = [], 2
+        batch.append(row)
+        size += row_size
+    if batch:
+        yield batch
+
+
 def push_rows(
     client: httpx.Client,
     paths: dict[str, Path],
@@ -506,7 +524,8 @@ def push_rows(
         path = paths[plan.db_id]
         total = row_count(path, plan)
         _log(f"{step}: pushing from row {source['pushed_rows']} of {total}...")
-        for batch in _batches(records(path, plan, source["pushed_rows"]), batch_size):
+        rows = records(path, plan, source["pushed_rows"])
+        for batch in _sized_batches(rows, batch_size, MAX_BATCH_BYTES):
             if dry_run:
                 _show(PUSH_URL, batch[:2])
                 break

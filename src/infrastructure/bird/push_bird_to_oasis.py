@@ -479,7 +479,7 @@ def _sized_batches(
     batch: list[dict] = []
     size = 2  # the list's brackets
     for row in rows:
-        row_size = len(json.dumps(row).encode()) + 1
+        row_size = len(json.dumps(row).encode()) + 2  # ", " between rows
         if batch and (len(batch) >= max_rows or size + row_size > max_bytes):
             yield batch
             batch, size = [], 2

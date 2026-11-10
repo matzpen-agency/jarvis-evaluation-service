@@ -493,7 +493,11 @@ def push_rows(
         if source["done"]:
             _log(f"{step}: already pushed, skipping")
             continue
-        token = tokens.get(source["source_id"]) or tokens.get(plan.key)
+        token = (
+            tokens.get(source["source_id"])
+            or tokens.get(plan.key)
+            or tokens.get(plan.english_name)
+        )
         if not token and not dry_run:
             _log(f"{step}: no Source-Access-Token, skipping")
             missing.append(plan.key)
@@ -533,7 +537,42 @@ def read_tokens(path: Path) -> dict[str, str]:
             r["source_id"].strip(): r["token"].strip()
             for r in csv.DictReader(text.splitlines())
         }
-    return {k: str(v).strip() for k, v in json.loads(text).items()}
+    value = json.loads(text)
+    if isinstance(value, dict):
+        return {k: str(v).strip() for k, v in value.items()}
+    if not isinstance(value, list):
+        sys.exit(f"{path}: expected a JSON object or list, got {type(value).__name__}")
+    tokens: dict[str, str] = {}
+    for n, item in enumerate(value):
+        tokens.update(_token_entry(item, f"{path} item {n}"))
+    return tokens
+
+
+def _token_entry(item: Any, where: str) -> dict[str, str]:
+    """
+    One element of a tokens list: [key, token], or an object with one field
+    whose name has "token" in it. Every other value of the object (source id,
+    "<db_id>.<table>", source name...) becomes a key for that token.
+    """
+    if isinstance(item, list) and len(item) == 2:
+        return {str(item[0]).strip(): str(item[1]).strip()}
+    if isinstance(item, dict):
+        token_fields = [k for k in item if "token" in k.lower()]
+        if len(token_fields) == 1:
+            token = str(item[token_fields[0]]).strip()
+            keys = [
+                str(v).strip()
+                for k, v in item.items()
+                if k != token_fields[0] and isinstance(v, (str, int)) and str(v)
+            ]
+            if keys:
+                return dict.fromkeys(keys, token)
+        fields = ", ".join(item) or "none"
+        sys.exit(
+            f"{where}: need exactly one field with 'token' in its name and the "
+            f"source id or '<db_id>.<table>' next to it (fields: {fields})"
+        )
+    sys.exit(f"{where}: expected [key, token] or an object, got {type(item).__name__}")
 
 
 def main(argv: list[str] | None = None) -> None:

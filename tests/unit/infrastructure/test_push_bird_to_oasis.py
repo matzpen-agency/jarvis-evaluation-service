@@ -246,3 +246,38 @@ def test_a_timeout_ends_with_one_clear_message(database, tmp_path, monkeypatch):
             ]
         )
     assert "delete it" in str(ended.value)
+
+
+def test_tokens_file_can_be_a_list(tmp_path):
+    path = tmp_path / "tokens.json"
+    path.write_text(
+        json.dumps(
+            [
+                {"sourceId": "id-1", "name": "shop-orders", "sourceAccessToken": " a "},
+                {"source_id": "id-2", "token": "b"},
+                ["shop.customers", "c"],
+            ]
+        )
+    )
+    assert oasis.read_tokens(path) == {
+        "id-1": "a",
+        "shop-orders": "a",
+        "id-2": "b",
+        "shop.customers": "c",
+    }
+
+    path.write_text(json.dumps([{"id": "x", "secret": "y"}]))
+    with pytest.raises(SystemExit, match=r"fields: id, secret"):
+        oasis.read_tokens(path)
+
+
+def test_push_finds_the_token_by_source_name(database, tmp_path):
+    fake = FakeOasis()
+    client = httpx.Client(transport=httpx.MockTransport(fake))
+    plans = [p for p in oasis.plan_database(database) if p.table == "orders"]
+    state = oasis.State(tmp_path / "state.json")
+    oasis.create_sources(client, plans, state, "api-token", "pool-1")
+    missing = oasis.push_rows(
+        client, {"shop": database}, plans, state, {"shop-orders": "t"}, 500
+    )
+    assert missing == [] and fake.pushed[0][0] == "t"

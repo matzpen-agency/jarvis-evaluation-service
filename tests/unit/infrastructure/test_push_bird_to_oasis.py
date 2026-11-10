@@ -281,3 +281,25 @@ def test_push_finds_the_token_by_source_name(database, tmp_path):
         client, {"shop": database}, plans, state, {"shop-orders": "t"}, 500
     )
     assert missing == [] and fake.pushed[0][0] == "t"
+
+
+def test_tokens_list_with_name_and_source_key(tmp_path):
+    path = tmp_path / "tokens.json"
+    path.write_text(
+        json.dumps(
+            [
+                {"name": "shop-orders", "source_key": "a"},
+                {"name": "shop-customers", "source_key": "b"},
+            ]
+        )
+    )
+    assert oasis.read_tokens(path) == {"shop-orders": "a", "shop-customers": "b"}
+
+    # only the database's name: can't tell its tables apart
+    path.write_text(
+        json.dumps(
+            [{"name": "shop", "source_key": "a"}, {"name": "shop", "source_key": "b"}]
+        )
+    )
+    with pytest.raises(SystemExit, match="two different tokens"):
+        oasis.read_tokens(path)

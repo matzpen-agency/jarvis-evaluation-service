@@ -10,6 +10,7 @@ reach every connection, so expected and generated SQL are executed through its
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any
 
@@ -22,6 +23,35 @@ from src.ports.connection_metadata_provider import ConnectionMetadataProvider
 from src.ports.query_executor import QueryExecutor
 
 logger = structlog.get_logger(__name__)
+
+_TEXT_TYPES = ("char", "text", "string", "clob")
+_DATE_VALUE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_DATETIME_VALUE_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2}(\.\d+)?)?")
+_DATE_NAME_RE = re.compile(r"(^|_)(date|dt|datetime|timestamp)($|_)|date$", re.IGNORECASE)
+
+
+def _column_type(col: dict[str, Any], name: str) -> str:
+    """
+    The column's type for the time shift. Text columns that hold dates
+    ('2021-05-10', '2021-05-10 08:30:00') come back as date_string /
+    timestamp_string so they are shifted too: judged by Jeen's example
+    values, or by the column's name when Jeen has no examples.
+    """
+    db_type = str(col.get("data_type") or "varchar").lower().strip()
+    if not any(t in db_type for t in _TEXT_TYPES):
+        return db_type
+    examples = [str(v).strip() for v in col.get("example_values") or [] if v not in (None, "")]
+    if examples:
+        if all(_DATE_VALUE_RE.fullmatch(v) for v in examples):
+            return "date_string"
+        if all(
+            _DATE_VALUE_RE.fullmatch(v) or _DATETIME_VALUE_RE.fullmatch(v) for v in examples
+        ):
+            return "timestamp_string"
+        return db_type
+    if col.get("semantic_type") == "time" or _DATE_NAME_RE.search(name):
+        return "date_string"
+    return db_type
 
 # Jeen connection dialect → sqlglot dialect
 _SQLGLOT_DIALECTS: dict[str, str] = {
@@ -157,7 +187,7 @@ class JeenMetadataClient:
             name = str(col.get("column_name") or "").strip()
             if not table or not name:
                 continue
-            db_type = str(col.get("data_type") or "varchar").lower()
+            db_type = _column_type(col, name)
             schema = str(col.get("schema") or "").lower().strip()
             catalog = str(col.get("catalog") or "").lower().strip()
 

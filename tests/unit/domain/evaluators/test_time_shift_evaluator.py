@@ -473,3 +473,39 @@ async def test_raised_connection_errors_are_inconclusive(sample_dataset_item):
 
     assert result.applicable is False
     assert result.details["shift_results"][0]["status"] == "inconclusive"
+
+
+def test_cte_wrap_shifts_dates_kept_as_text_in_trino():
+    """A text date keeps its format after the shift; non-dates stay unchanged."""
+    schema_map = {
+        "payments": {
+            "payment_date": "date_string",
+            "paid_at": "timestamp_string",
+            "note": "varchar",
+        }
+    }
+    result = dynamically_wrap_with_yaml_cte(
+        "SELECT COUNT(*) FROM payments WHERE payment_date >= '2021-05-01'", -7, schema_map
+    ).lower()
+    assert (
+        "coalesce(cast(date_add('day', -7, try_cast(payment_date as date)) as varchar), payment_date)"
+        in result
+    )
+    assert "date_format(date_add('day', -7, try_cast(paid_at as timestamp)), '%y-%m-%d %t'), paid_at)" in result
+    assert "note" in result and "note as" not in result  # not rewritten
+
+
+def test_cte_wrap_shifts_dates_kept_as_text_in_postgres():
+    schema_map = {"payments": {"payment_date": "date_string", "amount": "numeric"}}
+    result = dynamically_wrap_with_yaml_cte(
+        "SELECT COUNT(*) FROM payments", -7, schema_map, "postgres"
+    )
+    assert "TO_CHAR(CAST(payment_date AS DATE) + -7, 'YYYY-MM-DD')" in result
+    assert "ELSE payment_date END AS payment_date" in result
+    assert "~" in result
+
+
+def test_cte_wrap_leaves_text_dates_alone_in_other_dialects():
+    sql = "SELECT COUNT(*) FROM payments"
+    schema_map = {"payments": {"payment_date": "date_string"}}
+    assert dynamically_wrap_with_yaml_cte(sql, -7, schema_map, "tsql") == sql

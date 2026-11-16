@@ -691,9 +691,12 @@ def _is_temporal_type(db_type: str) -> bool:
 
 def _generate_shift_expression(
     col: str, db_type: str, shift_days: int, dialect: str | None = "trino"
-) -> str:
-    """Generate the dialect-specific shift expression for a temporal column."""
+) -> str | None:
+    """Generate the dialect-specific shift expression for a temporal column (None: can't shift it)."""
     db_type = db_type.lower()
+
+    if db_type in ("date_string", "timestamp_string"):
+        return _shift_date_string(col, db_type, shift_days, dialect)
 
     if "unix_millis" in db_type or "epoch_millis" in db_type:
         return f"({col} + ({shift_days} * 86400000))"
@@ -723,6 +726,38 @@ def _generate_shift_expression(
     if db_type == "date":
         shifted = exp.Cast(this=exp.paren(shifted), to=exp.DataType.build("date"))
     return shifted.sql(dialect=dialect)
+
+
+def _shift_date_string(
+    col: str, db_type: str, shift_days: int, dialect: str | None
+) -> str | None:
+    """
+    Shift a date kept as text ('2021-05-10' / '2021-05-10 08:30:00') and
+    write it back in the same format, so comparisons with string literals
+    and substrings keep working. Values that aren't dates stay as they are.
+    """
+    with_time = db_type == "timestamp_string"
+    if dialect in (None, "trino", "presto"):
+        if with_time:
+            shifted = (
+                f"date_format(date_add('day', {shift_days}, try_cast({col} AS TIMESTAMP)), "
+                f"'%Y-%m-%d %H:%i:%s')"
+            )
+        else:
+            shifted = f"CAST(date_add('day', {shift_days}, try_cast({col} AS DATE)) AS VARCHAR)"
+        return f"COALESCE({shifted}, {col})"
+    if dialect in ("postgres", "redshift"):
+        if with_time:
+            shifted = (
+                f"TO_CHAR(CAST({col} AS TIMESTAMP) + INTERVAL '{shift_days} day', "
+                f"'YYYY-MM-DD HH24:MI:SS')"
+            )
+        else:
+            shifted = f"TO_CHAR(CAST({col} AS DATE) + {shift_days}, 'YYYY-MM-DD')"
+        # Postgres has no try_cast: only cast values that look like dates
+        pattern = "'^[0-9]{4}-[0-9]{2}-[0-9]{2}( [0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?)?$'"
+        return f"CASE WHEN {col} ~ {pattern} THEN {shifted} ELSE {col} END"
+    return None
 
 
 def _lookup_table_schema(

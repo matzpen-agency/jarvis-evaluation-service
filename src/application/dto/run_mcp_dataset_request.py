@@ -36,6 +36,14 @@ class RunMcpDatasetRequest(BaseModel):
         description="Optional list of specific item IDs to evaluate.",
         examples=[["q-1", "q-2"]],
     )
+    model: str | None = Field(
+        default=None,
+        description=(
+            "LLM model the agent uses for every question (one the agent's list_models "
+            "returns). Omit for the agent's default."
+        ),
+        examples=["gemma4:e4b"],
+    )
     limit: int | None = Field(
         default=None,
         ge=0,

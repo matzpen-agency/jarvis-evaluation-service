@@ -233,6 +233,7 @@ async def submit_new_evaluation_job(
         metadata={
             "dataset_name": request.dataset_name,
             "connection_id": request.connection_id,
+            "model": request.model,
         },
     )
     return _job_response(job)

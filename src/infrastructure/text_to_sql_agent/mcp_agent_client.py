@@ -75,6 +75,9 @@ class McpAgentClient(AgentClient):
             "hitl_enabled": False,
             "thread_id": thread_id,
         }
+        if kwargs.get("model"):
+            # Only when chosen: agents without model selection keep their default
+            tool_arguments["model"] = kwargs["model"]
 
         payload = {
             "jsonrpc": "2.0",

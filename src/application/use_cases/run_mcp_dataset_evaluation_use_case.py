@@ -92,7 +92,10 @@ class RunMcpDatasetEvaluationUseCase:
             limit=request.limit,
             offset=request.offset,
             # Forwarded through EvaluationRunner → agent_client.run(**kwargs)
-            agent_kwargs={"connection_id": request.connection_id},
+            agent_kwargs={
+                "connection_id": request.connection_id,
+                **({"model": request.model} if request.model else {}),
+            },
             progress_callback=progress_callback,
             item_callback=(
                 (

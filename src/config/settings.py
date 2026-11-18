@@ -107,6 +107,17 @@ class Settings(BaseSettings):
     # Saved decisions per question (stable across runs); relative to project root
     ORDER_JUDGE_CACHE_PATH: str = "data/order_judgments.json"
 
+    # ── LLM judge (second look at questions contains accuracy failed) ─────────
+    # Name of the Langfuse text prompt (label "production") the judge uses,
+    # uploaded with scripts/upload_judge_prompt.py. Empty: no judge.
+    LLM_JUDGE_PROMPT_NAME: str = ""
+    # Model for the judge; empty: LLM_MODEL
+    LLM_JUDGE_MODEL: str = ""
+    # A "false negative" verdict turns the question into a pass only at this
+    # confidence (0-100) or above
+    LLM_JUDGE_MIN_CONFIDENCE: int = 80
+    LLM_JUDGE_TIMEOUT: float = 120.0
+
     # ── Backend (for resolving production tables and query execution) ─────────
     BACKEND_URL: str = "http://localhost:8000"
     BACKEND_QUERY_ENDPOINT: str = "/api/query/execute"

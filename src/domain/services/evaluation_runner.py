@@ -38,6 +38,7 @@ from src.domain.services.metrics_aggregator import MetricsAggregator, SampleReco
 from src.ports.agent_client import AgentClient
 from src.ports.connection_metadata_provider import ConnectionMetadataProvider
 from src.ports.dataset_provider import DatasetProvider
+from src.ports.false_negative_judge import FalseNegativeJudge
 from src.ports.query_executor import AgentSqlExecutor, QueryExecutor
 from src.ports.trace_reporter import TraceReporter
 
@@ -48,6 +49,8 @@ ItemCallback = Callable[[SampleRecord], None]
 
 # Upper bound for reporting one sample to Langfuse (link retries included)
 _REPORT_TIMEOUT_SECONDS = 180.0
+# The LLM judge's result name (a second look at questions contains accuracy failed)
+JUDGE_NAME = "llm_judge"
 
 
 class EvaluationRunner:
@@ -73,6 +76,8 @@ class EvaluationRunner:
         numeric_tolerance: int = 6,
         agent_executor: AgentSqlExecutor | None = None,
         expected_on_agent_engine: bool = True,
+        false_negative_judge: FalseNegativeJudge | None = None,
+        judge_min_confidence: int = 80,
     ) -> None:
         self._dataset_provider = dataset_provider
         self._agent_client = agent_client
@@ -88,6 +93,8 @@ class EvaluationRunner:
         self._numeric_tolerance = numeric_tolerance
         self._agent_executor = agent_executor
         self._expected_on_agent_engine = expected_on_agent_engine
+        self._false_negative_judge = false_negative_judge
+        self._judge_min_confidence = judge_min_confidence
 
     async def run(
         self,
@@ -449,7 +456,88 @@ class EvaluationRunner:
         if context.expected_result is not None and not context.expected_result.success:
             context.metadata["expected_sql_error"] = context.expected_result.error
 
-        return await self._engine.run_all(context)
+        results = await self._engine.run_all(context)
+        await self._judge_failed_question(context, results)
+        return results
+
+    async def _judge_failed_question(
+        self, context: EvaluationContext, results: list[EvaluationResult]
+    ) -> None:
+        """
+        When contains accuracy failed the question, ask the LLM judge whether
+        the generated result answers the question anyway. Its verdict is added
+        as the "llm_judge" result; a confident "false negative" (confidence at
+        least judge_min_confidence) turns contains accuracy into a pass, and
+        the original verdict is kept in its details.
+        """
+        if self._false_negative_judge is None:
+            return
+        contains = next(
+            (r for r in results if r.evaluator_name == "contains_accuracy"), None
+        )
+        if (
+            contains is None
+            or not contains.applicable
+            or contains.passed
+            or contains.error
+        ):
+            return
+        generated = context.generated_result
+        if (
+            generated is None
+            or not generated.success
+            or context.expected_result is None
+        ):
+            results.append(
+                EvaluationResult.not_applicable(JUDGE_NAME, "generated_sql_did_not_run")
+            )
+            return
+
+        reason = str(contains.details.get("reason") or "results_differ")
+        verdict = await self._false_negative_judge.judge(
+            question=context.query,
+            expected=context.expected_result,
+            generated=generated,
+            failure_reason=reason,
+            failure_details=contains.details,
+        )
+        details = {
+            "is_false_negative": verdict.is_false_negative,
+            "confidence": verdict.confidence,
+            "min_confidence": self._judge_min_confidence,
+            "reasoning": verdict.reasoning,
+            "key_differences": verdict.key_differences,
+            "judged_failure_reason": reason,
+            "model": verdict.model,
+            "prompt_name": verdict.prompt_name,
+            "prompt_version": verdict.prompt_version,
+        }
+        if verdict.error:
+            results.append(
+                EvaluationResult.not_applicable(
+                    JUDGE_NAME, "judge_unavailable", error=verdict.error, **details
+                )
+            )
+            return
+
+        overturned = (
+            bool(verdict.is_false_negative)
+            and (verdict.confidence or 0) >= self._judge_min_confidence
+        )
+        details["overturned"] = overturned
+        results.append(
+            EvaluationResult(
+                evaluator_name=JUDGE_NAME,
+                score=1.0 if overturned else 0.0,
+                passed=overturned,
+                details=details,
+            )
+        )
+        if overturned:
+            contains.details["overturned_by_llm_judge"] = True
+            contains.details["original_score"] = contains.score
+            contains.score = 1.0
+            contains.passed = True
 
     async def _execute_expected(self, context: EvaluationContext) -> None:
         """

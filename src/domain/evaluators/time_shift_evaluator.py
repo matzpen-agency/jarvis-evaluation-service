@@ -83,6 +83,14 @@ class TimeShiftEvaluator(BaseEvaluator):
     async def _evaluate(self, context: EvaluationContext) -> EvaluationResult:
         if not context.expected_sql:
             return EvaluationResult.not_applicable(self.name, "missing_sql")
+        # Same order as contains accuracy: a golden SQL that failed (or found
+        # nothing) can't judge the question, even when the agent has no SQL
+        if context.expected_result is not None and not context.expected_result.success:
+            return EvaluationResult.not_applicable(
+                self.name, "expected_sql_execution_failed"
+            )
+        if has_no_data(context.expected_result):
+            return EvaluationResult.not_applicable(self.name, "golden_result_has_no_data")
         if not context.generated_sql:
             return EvaluationResult(
                 evaluator_name=self.name,
@@ -90,13 +98,6 @@ class TimeShiftEvaluator(BaseEvaluator):
                 passed=False,
                 details={"reason": "missing_sql"},
             )
-        if context.expected_result is not None and not context.expected_result.success:
-            return EvaluationResult.not_applicable(
-                self.name, "expected_sql_execution_failed"
-            )
-
-        if has_no_data(context.expected_result):
-            return EvaluationResult.not_applicable(self.name, "golden_result_has_no_data")
 
         schema_map = await self._schema_map(context)
         expected_sql = context.executed_expected_sql or context.expected_sql

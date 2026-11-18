@@ -509,3 +509,16 @@ def test_cte_wrap_leaves_text_dates_alone_in_other_dialects():
     sql = "SELECT COUNT(*) FROM payments"
     schema_map = {"payments": {"payment_date": "date_string"}}
     assert dynamically_wrap_with_yaml_cte(sql, -7, schema_map, "tsql") == sql
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_failed_golden_sql_is_not_applicable_even_without_generated_sql(sample_dataset_item):
+    """Like contains accuracy: when the golden SQL failed (e.g. the database was
+    unreachable), a missing generated SQL doesn't make the time shift 0."""
+    evaluator = TimeShiftEvaluator(query_executor=AsyncMock())
+    ctx = _ctx(sample_dataset_item, generated_sql=None)
+    ctx.expected_result = QueryResult.failure("Name or service not known")
+    result = await evaluator.evaluate(ctx)
+    assert result.applicable is False
+    assert result.details["reason"] == "expected_sql_execution_failed"

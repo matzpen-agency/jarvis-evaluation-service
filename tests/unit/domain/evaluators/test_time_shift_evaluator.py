@@ -522,3 +522,89 @@ async def test_failed_golden_sql_is_not_applicable_even_without_generated_sql(sa
     result = await evaluator.evaluate(ctx)
     assert result.applicable is False
     assert result.details["reason"] == "expected_sql_execution_failed"
+
+
+def _one_failing_shift_executor():
+    """-1 matches; -7 returns different generated rows (a failed shift)."""
+
+    async def mock_execute(sql: str, connection_id: int | None = None) -> QueryResult:
+        if "2026-09-01" in sql and "-7" in sql:
+            return _rows(99)
+        return _rows(10)
+
+    executor = AsyncMock()
+    executor.execute = AsyncMock(side_effect=mock_execute)
+    return executor
+
+
+def _judge(verdict):
+    from unittest.mock import MagicMock
+
+    judge = MagicMock()
+    judge.judge = AsyncMock(return_value=verdict)
+    return judge
+
+
+def _shift_ctx(sample_dataset_item):
+    return _ctx(
+        sample_dataset_item,
+        expected_sql="SELECT order_date FROM orders WHERE order_date >= CURRENT_DATE - INTERVAL '30' DAY",
+        generated_sql="SELECT order_date FROM orders WHERE order_date >= DATE '2026-09-01'",
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_judge_looks_at_each_failed_shift_with_its_own_results(sample_dataset_item):
+    from src.ports.false_negative_judge import JudgeVerdict
+
+    judge = _judge(JudgeVerdict(True, 90, "same answer"))
+    evaluator = TimeShiftEvaluator(
+        query_executor=_one_failing_shift_executor(),
+        offsets_days=[-1, -7],
+        false_negative_judge=judge,
+    )
+    result = await evaluator.evaluate(_shift_ctx(sample_dataset_item))
+
+    judge.judge.assert_awaited_once()  # only the failed shift
+    kwargs = judge.judge.await_args.kwargs
+    assert kwargs["expected"].rows == [[10]] and kwargs["generated"].rows == [[99]]
+    assert result.score == 1.0 and result.passed
+    passed_shift = result.details["shift_results"][1]
+    assert passed_shift["status"] == "passed"
+    assert passed_shift["llm_judge"]["overturned"] is True
+    assert result.details["shifts_judged"] == 1
+    assert result.details["shifts_passed_by_llm_judge"] == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confidence, correct", [(60, True), (95, False)])
+async def test_unsure_or_wrong_judge_keeps_the_shift_failed(sample_dataset_item, confidence, correct):
+    from src.ports.false_negative_judge import JudgeVerdict
+
+    evaluator = TimeShiftEvaluator(
+        query_executor=_one_failing_shift_executor(),
+        offsets_days=[-1, -7],
+        false_negative_judge=_judge(JudgeVerdict(correct, confidence, "r")),
+    )
+    result = await evaluator.evaluate(_shift_ctx(sample_dataset_item))
+    assert result.score == 0.5
+    failed = result.details["shift_results"][1]
+    assert failed["status"] == "failed" and failed["llm_judge"]["overturned"] is False
+    assert result.details["shifts_passed_by_llm_judge"] == 0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_judge_errors_leave_the_shift_failed(sample_dataset_item):
+    from src.ports.false_negative_judge import JudgeVerdict
+
+    evaluator = TimeShiftEvaluator(
+        query_executor=_one_failing_shift_executor(),
+        offsets_days=[-1, -7],
+        false_negative_judge=_judge(JudgeVerdict(None, error="judge unavailable: 503")),
+    )
+    result = await evaluator.evaluate(_shift_ctx(sample_dataset_item))
+    failed = result.details["shift_results"][1]
+    assert failed["status"] == "failed" and "503" in failed["llm_judge"]["error"]

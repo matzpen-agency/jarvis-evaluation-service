@@ -13,6 +13,11 @@ For each configured offset (e.g. -1, -7, -14, -30, -60 days):
      connection, the generated SQL on the agent's engine when it ran there.
   3. Compare with the same contains check as the primary metric.
 
+With an LLM judge, every shift the contains check failed (both queries ran)
+is shown to the judge with that shift's results; a confident "the generated
+result answers the question anyway" turns the shift into a pass, and the
+verdict is kept on the shift (llm_judge).
+
 Score = passing shifts / conclusive shifts. A shift is inconclusive (not
 counted) when the shifted golden SQL fails, when either query fails because
 the database couldn't be reached or timed out, or when both results are
@@ -39,6 +44,7 @@ from src.domain.evaluators.sql_comparison_utils import (
     is_infrastructure_error,
 )
 from src.domain.services.deadline import run_with_deadline
+from src.ports.false_negative_judge import FalseNegativeJudge
 from src.ports.order_judge import OrderJudge
 from src.ports.query_executor import QueryExecutor
 
@@ -60,10 +66,16 @@ class TimeShiftEvaluator(BaseEvaluator):
         shift_timeout_seconds: float = 180.0,
         order_judge: OrderJudge | None = None,
         agent_executor: QueryExecutor | None = None,
+        false_negative_judge: FalseNegativeJudge | None = None,
+        judge_min_confidence: int = 80,
     ) -> None:
+        self._judge = false_negative_judge
+        self._judge_min_confidence = judge_min_confidence
         self._executor = query_executor
         self._agent_executor = agent_executor
-        self._offsets = offsets_days if offsets_days is not None else [-1, -7, -14, -30, -60]
+        self._offsets = (
+            offsets_days if offsets_days is not None else [-1, -7, -14, -30, -60]
+        )
         self._numeric_tolerance = numeric_tolerance
         self._resolver = table_resolver
         self._shift_timeout = shift_timeout_seconds
@@ -90,7 +102,9 @@ class TimeShiftEvaluator(BaseEvaluator):
                 self.name, "expected_sql_execution_failed"
             )
         if has_no_data(context.expected_result):
-            return EvaluationResult.not_applicable(self.name, "golden_result_has_no_data")
+            return EvaluationResult.not_applicable(
+                self.name, "golden_result_has_no_data"
+            )
         if not context.generated_sql:
             return EvaluationResult(
                 evaluator_name=self.name,
@@ -104,8 +118,12 @@ class TimeShiftEvaluator(BaseEvaluator):
         generated_sql = context.executed_generated_sql or context.generated_sql
         dialect = context.dialect or "trino"
         # SQL run on the agent's engine stays in the agent's dialect
-        expected_dialect = context.agent_dialect if context.expected_on_agent_engine else dialect
-        generated_dialect = context.agent_dialect if context.generated_on_agent_engine else dialect
+        expected_dialect = (
+            context.agent_dialect if context.expected_on_agent_engine else dialect
+        )
+        generated_dialect = (
+            context.agent_dialect if context.generated_on_agent_engine else dialect
+        )
 
         shifted_pairs = []
         for offset in self._offsets:
@@ -129,9 +147,7 @@ class TimeShiftEvaluator(BaseEvaluator):
 
         outcomes = await asyncio.gather(
             *(
-                self._evaluate_shift(
-                    context, offset, exp_sql, gen_sql
-                )
+                self._evaluate_shift(context, offset, exp_sql, gen_sql)
                 for offset, exp_sql, gen_sql in shifted_pairs
             ),
             return_exceptions=True,
@@ -140,12 +156,23 @@ class TimeShiftEvaluator(BaseEvaluator):
         shift_results: list[dict[str, Any]] = []
         for (offset, _, _), outcome in zip(shifted_pairs, outcomes, strict=True):
             if isinstance(outcome, BaseException):
-                logger.warning("time_shift.shift_failed", offset_days=offset, error=str(outcome))
+                logger.warning(
+                    "time_shift.shift_failed", offset_days=offset, error=str(outcome)
+                )
                 error = str(outcome) or type(outcome).__name__
                 if is_infrastructure_error(error) or isinstance(outcome, TimeoutError):
-                    outcome = {"offset_days": offset, "status": "inconclusive", "error": error}
+                    outcome = {
+                        "offset_days": offset,
+                        "status": "inconclusive",
+                        "error": error,
+                    }
                 else:
-                    outcome = {"offset_days": offset, "status": "failed", "score": 0.0, "error": error}
+                    outcome = {
+                        "offset_days": offset,
+                        "status": "failed",
+                        "score": 0.0,
+                        "error": error,
+                    }
             shift_results.append(outcome)
 
         conclusive = [r for r in shift_results if r["status"] != "inconclusive"]
@@ -156,6 +183,11 @@ class TimeShiftEvaluator(BaseEvaluator):
             # False when no shift changed the golden result: the question is
             # time-independent on this data, so a pass proves less
             "discriminative": any(r.get("expected_changed") for r in shift_results),
+            # Shifts the contains check failed that the LLM judge looked at / passed
+            "shifts_judged": sum(1 for r in shift_results if "llm_judge" in r),
+            "shifts_passed_by_llm_judge": sum(
+                1 for r in shift_results if (r.get("llm_judge") or {}).get("overturned")
+            ),
         }
         if not conclusive:
             return EvaluationResult.not_applicable(
@@ -179,7 +211,9 @@ class TimeShiftEvaluator(BaseEvaluator):
             details=details,
         )
 
-    async def _schema_map(self, context: EvaluationContext) -> dict[str, dict[str, str]]:
+    async def _schema_map(
+        self, context: EvaluationContext
+    ) -> dict[str, dict[str, str]]:
         if context.schema_map:
             return context.schema_map
         if self._resolver is None:
@@ -236,7 +270,9 @@ class TimeShiftEvaluator(BaseEvaluator):
                 "reason": "shifted_expected_sql_failed",
                 "expected_error": expected_result.error,
             }
-        if not generated_result.success and is_infrastructure_error(generated_result.error):
+        if not generated_result.success and is_infrastructure_error(
+            generated_result.error
+        ):
             # The database link failed, not the agent's SQL
             return {
                 "offset_days": offset_days,
@@ -268,6 +304,14 @@ class TimeShiftEvaluator(BaseEvaluator):
         else:
             status = "passed" if score >= 1.0 else "failed"
 
+        judge = None
+        if status == "failed" and self._judge is not None:
+            judge = await self._judge_shift(
+                context, expected_result, generated_result, details
+            )
+            if judge.get("overturned"):
+                status, score = "passed", 1.0
+
         expected_changed = None
         if context.expected_result is not None and context.expected_result.success:
             unchanged, _ = compare_results(
@@ -284,4 +328,35 @@ class TimeShiftEvaluator(BaseEvaluator):
             "score": score,
             "expected_changed": expected_changed,
             **details,
+            **({"llm_judge": judge} if judge is not None else {}),
+        }
+
+    async def _judge_shift(
+        self,
+        context: EvaluationContext,
+        expected_result,
+        generated_result,
+        details: dict[str, Any],
+    ) -> dict[str, Any]:
+        """The LLM judge's verdict on one failed shift (never raises)."""
+        reason = str(details.get("reason") or "results_differ")
+        verdict = await self._judge.judge(  # type: ignore[union-attr]
+            question=context.query,
+            expected=expected_result,
+            generated=generated_result,
+            failure_reason=reason,
+            failure_details=details,
+        )
+        if verdict.error:
+            return {"overturned": False, "error": verdict.error}
+        overturned = (
+            bool(verdict.is_false_negative)
+            and (verdict.confidence or 0) >= self._judge_min_confidence
+        )
+        return {
+            "overturned": overturned,
+            "is_false_negative": verdict.is_false_negative,
+            "confidence": verdict.confidence,
+            "reasoning": verdict.reasoning,
+            "judged_failure_reason": reason,
         }

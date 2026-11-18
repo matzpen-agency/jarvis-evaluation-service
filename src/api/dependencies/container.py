@@ -325,6 +325,8 @@ def get_evaluation_engine(
             shift_timeout_seconds=settings.TIME_SHIFT_TIMEOUT,
             order_judge=_get_order_judge(),
             agent_executor=_get_agent_executor(),
+            false_negative_judge=_get_false_negative_judge(),
+            judge_min_confidence=settings.LLM_JUDGE_MIN_CONFIDENCE,
         ),
         ComponentMatchEvaluator(),
         SchemaValidityEvaluator(table_resolver=table_resolver),

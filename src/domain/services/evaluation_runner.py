@@ -538,6 +538,37 @@ class EvaluationRunner:
             contains.details["original_score"] = contains.score
             contains.score = 1.0
             contains.passed = True
+            self._apply_verdict_to_time_shift(results, reason)
+
+    @staticmethod
+    def _apply_verdict_to_time_shift(
+        results: list[EvaluationResult], reason: str
+    ) -> None:
+        """
+        A shift that failed for the very reason the judge accepted (e.g. the
+        same missing extra column) would fail the question again on the same
+        point, so it counts as passed; shifts that failed for anything else
+        (other rows, other values) still fail.
+        """
+        shift = next((r for r in results if r.evaluator_name == "time_shift"), None)
+        if shift is None or not shift.applicable or shift.error:
+            return
+        shift_results = shift.details.get("shift_results") or []
+        conclusive = [r for r in shift_results if r.get("status") != "inconclusive"]
+        changed = 0
+        for r in conclusive:
+            if r.get("status") == "failed" and r.get("reason") == reason:
+                r["status"] = "passed"
+                r["passed_by_llm_judge"] = True
+                changed += 1
+        if not changed or not conclusive:
+            return
+        passed = sum(1 for r in conclusive if r.get("status") == "passed")
+        shift.details["original_score"] = shift.score
+        shift.details["shifts_passed_by_llm_judge"] = changed
+        shift.score = round(passed / len(conclusive), 4)
+        shift.details["aggregate_score"] = shift.score
+        shift.passed = passed == len(conclusive)
 
     async def _execute_expected(self, context: EvaluationContext) -> None:
         """

@@ -231,3 +231,61 @@ async def test_llm_judge_without_its_prompt_reports_why():
         failure_details={},
     )
     assert verdict.is_false_negative is None and "not found" in verdict.error
+
+
+def _shift(*statuses_and_reasons):
+    return EvaluationResult(
+        "time_shift",
+        0.0,
+        False,
+        details={
+            "shift_results": [
+                {"offset_days": i, "status": status, "reason": reason}
+                for i, (status, reason) in enumerate(statuses_and_reasons)
+            ]
+        },
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_overturn_also_passes_shifts_that_failed_for_the_same_reason():
+    runner, _ = _runner(JudgeVerdict(True, 95, "margin is what was asked"))
+    contains = EvaluationResult(
+        "contains_accuracy",
+        0.0,
+        False,
+        details={"reason": "insufficient_generated_columns"},
+    )
+    shift = _shift(
+        ("failed", "insufficient_generated_columns"),
+        ("failed", "insufficient_generated_columns"),
+        ("failed", "row_count_mismatch"),
+        ("inconclusive", "shifted_expected_sql_failed"),
+    )
+    results = [contains, shift]
+
+    await runner._judge_failed_question(_context(), results)
+
+    assert shift.score == round(2 / 3, 4) and not shift.passed
+    assert shift.details["original_score"] == 0.0
+    assert shift.details["shifts_passed_by_llm_judge"] == 2
+    statuses = [r["status"] for r in shift.details["shift_results"]]
+    assert statuses == ["passed", "passed", "failed", "inconclusive"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_upheld_failure_leaves_the_time_shift_alone():
+    runner, _ = _runner(JudgeVerdict(False, 95, "wrong values"))
+    contains = EvaluationResult(
+        "contains_accuracy",
+        0.0,
+        False,
+        details={"reason": "insufficient_generated_columns"},
+    )
+    shift = _shift(("failed", "insufficient_generated_columns"))
+    await runner._judge_failed_question(_context(), [contains, shift])
+    assert (
+        shift.score == 0.0 and shift.details["shift_results"][0]["status"] == "failed"
+    )

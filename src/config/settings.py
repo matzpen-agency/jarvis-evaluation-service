@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     AGENT_TRINO_REQUEST_TIMEOUT: float = 60.0
     # Same cap as Jeen run_query, so both results are truncated alike
     AGENT_TRINO_MAX_ROWS: int = 1000
+    # Queries run on the agent's Trino at once (its databases have few connections)
+    AGENT_TRINO_MAX_CONCURRENT_QUERIES: int = 2
     # Run the golden SQL on the agent's Trino too (transpiled), so both results
     # come from the same engine; falls back to the connection when it can't run there
     EXPECTED_SQL_ON_AGENT_ENGINE: bool = True

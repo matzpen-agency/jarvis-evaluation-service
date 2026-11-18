@@ -198,6 +198,7 @@ def _get_agent_executor() -> AgentSqlExecutor | None:
         catalogs=catalogs,
         max_rows=settings.AGENT_TRINO_MAX_ROWS,
         default_catalog=settings.AGENT_TRINO_CATALOG,
+        max_concurrent_queries=settings.AGENT_TRINO_MAX_CONCURRENT_QUERIES,
     )
 
 

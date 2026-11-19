@@ -46,6 +46,13 @@ class BirdBenchmarkProvider(BenchmarkProvider):
         bundled = self._loader.bundled_db_ids()
         if bundled and (connection_name or "").strip().lower().startswith("bird"):
             return f"{BIRD_DATASET_PREFIX}{BIRD_ALL_BUNDLED}"
+        if connection_name is None:
+            raise DatasetNotFoundError(
+                "Couldn't get the connection's name from Jeen, so BIRD can't tell "
+                "which database it holds. Check that the service reaches Jeen "
+                "(JEEN_METADATA_MCP_URL; the log has "
+                "jeen_metadata.connection_lookup_failed with the reason)."
+            )
         raise DatasetNotFoundError(
             f"Connection {connection_name!r} doesn't hold a BIRD database. Run BIRD on a "
             f"connection named after a BIRD database id, or on a connection whose name "

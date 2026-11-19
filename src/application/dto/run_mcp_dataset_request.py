@@ -46,12 +46,14 @@ class RunMcpDatasetRequest(BaseModel):
         ),
         examples=["gemma4:e4b"],
     )
-    agent: Literal["current", "previous"] = Field(
+    agent: Literal["current", "deep", "previous"] = Field(
         default="current",
         description=(
             "Which Text-to-SQL agent answers the questions: the current, "
-            "connection-based agent, or the previous TextToSQL agent (which "
-            "always looks in PREVIOUS_AGENT_DATABASES and ignores model)."
+            "connection-based agent (chat_with_agent), the Deep Agent "
+            "(deep_agent, same MCP server; needs an agent from "
+            "feature/deep-agent-updated), or the previous TextToSQL agent "
+            "(which always looks in PREVIOUS_AGENT_DATABASES and ignores model)."
         ),
         examples=["current"],
     )

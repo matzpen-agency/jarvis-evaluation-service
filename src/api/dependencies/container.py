@@ -60,6 +60,7 @@ from src.infrastructure.llm.llm_false_negative_judge import LlmFalseNegativeJudg
 from src.infrastructure.llm.llm_order_judge import LlmOrderJudge
 from src.infrastructure.text_to_sql_agent.agent_router import (
     CURRENT_AGENT,
+    DEEP_AGENT,
     PREVIOUS_AGENT,
     AgentRouter,
 )
@@ -430,6 +431,7 @@ def get_run_mcp_dataset_use_case(
     agent_client = AgentRouter(
         {
             CURRENT_AGENT: McpAgentClient(settings=settings),
+            DEEP_AGENT: McpAgentClient.deep_agent(settings),
             PREVIOUS_AGENT: PreviousAgentClient(settings=settings),
         }
     )

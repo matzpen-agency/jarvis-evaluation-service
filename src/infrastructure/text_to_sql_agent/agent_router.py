@@ -2,7 +2,8 @@
 agent_router.py — Sends each question to the agent the evaluation chose.
 
 agent_kwargs["agent"] names it: "current" (default, the connection-based
-agent) or "previous" (the earlier TextToSQL agent).
+agent's chat_with_agent), "deep" (the Deep Agent, deep_agent on the same
+MCP server) or "previous" (the earlier TextToSQL agent).
 """
 
 from __future__ import annotations
@@ -13,8 +14,9 @@ from src.domain.entities.agent_response import AgentResponse
 from src.ports.agent_client import AgentClient
 
 CURRENT_AGENT = "current"
+DEEP_AGENT = "deep"
 PREVIOUS_AGENT = "previous"
-AGENTS = (CURRENT_AGENT, PREVIOUS_AGENT)
+AGENTS = (CURRENT_AGENT, DEEP_AGENT, PREVIOUS_AGENT)
 
 
 class AgentRouter(AgentClient):

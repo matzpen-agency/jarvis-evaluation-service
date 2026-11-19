@@ -97,7 +97,7 @@ class RunMcpDatasetEvaluationUseCase:
                 # The previous agent has no model choice
                 **(
                     {"model": request.model}
-                    if request.model and request.agent == "current"
+                    if request.model and request.agent != "previous"
                     else {}
                 ),
                 **({"agent": request.agent} if request.agent != "current" else {}),

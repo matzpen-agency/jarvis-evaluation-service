@@ -1,5 +1,5 @@
 """
-test_previous_agent.py — the previous TextToSQL agent can answer an evaluation.
+test_agent_choice.py — the previous TextToSQL agent and the Deep Agent can answer an evaluation.
 """
 
 from __future__ import annotations
@@ -116,3 +116,72 @@ async def test_use_case_forwards_the_agent(agent, model, expected):
     with pytest.raises(RuntimeError):
         await use_case.execute(request)
     assert runner.run.await_args.kwargs["agent_kwargs"] == expected
+
+
+# ── The Deep Agent (deep_agent tool on the current agent's MCP server) ──────
+
+
+def _deep_client(monkeypatch):
+    from src.infrastructure.text_to_sql_agent.mcp_agent_client import McpAgentClient
+
+    client = McpAgentClient.deep_agent(Settings(AGENT_TIMEOUT=300))
+    call = AsyncMock(
+        return_value={
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": '{"status": "completed", "sql_query": "SELECT 1", '
+                        '"engine": "deep", "verification": "matched", '
+                        '"confidence": "high", "executed": true}',
+                    }
+                ]
+            }
+        }
+    )
+    monkeypatch.setattr(client, "_call_mcp", call)
+    return client, call
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_deep_agent_calls_its_own_tool(monkeypatch):
+    client, call = _deep_client(monkeypatch)
+    response = await client.run("How many orders?", [], connection_id=6)
+    params = call.await_args.args[0]["params"]
+    assert params["name"] == "deep_agent"
+    arguments = params["arguments"]
+    # its threads must start with deep-, and it stops before our timeout
+    assert arguments["thread_id"].startswith("deep-")
+    assert arguments["timeout_s"] == 290
+    assert arguments["connection_id"] == 6 and arguments["hitl_enabled"] is False
+    assert "model" not in arguments
+    assert response.succeeded and response.sql_query == "SELECT 1"
+    assert response.metadata["verification"] == "matched"
+    assert response.metadata["confidence"] == "high"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_deep_agent_gets_the_chosen_model(monkeypatch):
+    client, call = _deep_client(monkeypatch)
+    await client.run("q", [], connection_id=6, model="gpt-oss:20b")
+    assert call.await_args.args[0]["params"]["arguments"]["model"] == "gpt-oss:20b"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_use_case_forwards_the_deep_agent_and_its_model():
+    runner = MagicMock()
+    runner.run = AsyncMock(side_effect=RuntimeError("stop"))
+    use_case = RunMcpDatasetEvaluationUseCase(runner=runner)
+    request = RunMcpDatasetRequest(
+        dataset_name="ds", connection_id=6, model="gpt-oss:20b", agent="deep"
+    )
+    with pytest.raises(RuntimeError):
+        await use_case.execute(request)
+    assert runner.run.await_args.kwargs["agent_kwargs"] == {
+        "connection_id": 6,
+        "model": "gpt-oss:20b",
+        "agent": "deep",
+    }

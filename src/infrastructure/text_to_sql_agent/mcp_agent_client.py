@@ -28,6 +28,11 @@ from src.ports.agent_client import AgentClient
 
 logger = structlog.get_logger(__name__)
 
+# The Deep Agent is told to stop this much before AGENT_TIMEOUT
+DEEP_AGENT_STOP_MARGIN_S = 10.0
+# What the Deep Agent adds to the shared response shape
+_DEEP_FIELDS = ("engine", "verification", "confidence", "executed", "semantic_validation")
+
 
 class McpAgentError(Exception):
     """Raised when the MCP agent call fails."""
@@ -50,11 +55,38 @@ class McpAgentClient(AgentClient):
       2. Collect the first non-ping SSE event that carries the result
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        tool_name: str = "chat_with_agent",
+        thread_prefix: str = "",
+        extra_arguments: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        tool_name picks the agent on the same MCP server: chat_with_agent (the
+        current agent) or deep_agent (the Deep Agent, whose thread ids must
+        start with "deep-" and which takes timeout_s).
+        """
         self._base_url = settings.MCP_AGENT_URL.rstrip("/")
         self._connection_id = settings.MCP_AGENT_CONNECTION_ID
         self._timeout = settings.AGENT_TIMEOUT
         self._max_retries = 3
+        self._tool_name = tool_name
+        self._thread_prefix = thread_prefix
+        self._extra_arguments = extra_arguments or {}
+
+    @classmethod
+    def deep_agent(cls, settings: Settings) -> McpAgentClient:
+        """The Deep Agent (feature/deep-agent-updated): stops its run a little
+        before AGENT_TIMEOUT so its answer still arrives in time."""
+        return cls(
+            settings,
+            tool_name="deep_agent",
+            thread_prefix="deep-",
+            extra_arguments={
+                "timeout_s": max(settings.AGENT_TIMEOUT - DEEP_AGENT_STOP_MARGIN_S, 1.0)
+            },
+        )
 
     async def run(
         self,
@@ -63,7 +95,7 @@ class McpAgentClient(AgentClient):
         **kwargs: Any,
     ) -> AgentResponse:
         """Call the MCP agent and return a normalised AgentResponse."""
-        thread_id = kwargs.get("thread_id") or str(uuid.uuid4())
+        thread_id = kwargs.get("thread_id") or f"{self._thread_prefix}{uuid.uuid4()}"
 
         connection_id = kwargs.get("connection_id")
         if connection_id is None:
@@ -74,6 +106,7 @@ class McpAgentClient(AgentClient):
             "query": query,
             "hitl_enabled": False,
             "thread_id": thread_id,
+            **self._extra_arguments,
         }
         if kwargs.get("model"):
             # Only when chosen: agents without model selection keep their default
@@ -84,7 +117,7 @@ class McpAgentClient(AgentClient):
             "id": thread_id,
             "method": "tools/call",
             "params": {
-                "name": "chat_with_agent",
+                "name": self._tool_name,
                 "arguments": tool_arguments,
             },
         }
@@ -273,5 +306,6 @@ class McpAgentClient(AgentClient):
                 "execution_path": data.get("execution_path", []),
                 "is_unanswerable": data.get("is_unanswerable", False),
                 "trace_id": data.get("trace_id"),
+                **{key: data[key] for key in _DEEP_FIELDS if key in data},
             },
         )

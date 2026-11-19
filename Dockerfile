@@ -25,6 +25,10 @@ RUN --mount=type=ssh uv sync --frozen --no-cache
 
 # Copy the rest of the project source code
 COPY src ./src
+# The LLM judge prompt and its upload script, to run from the pod:
+#   cd /app && PYTHONPATH=. .venv/bin/python scripts/upload_judge_prompt.py
+COPY prompts ./prompts
+COPY scripts/upload_judge_prompt.py ./scripts/upload_judge_prompt.py
 
 # Expose evaluation service port
 EXPOSE 5002

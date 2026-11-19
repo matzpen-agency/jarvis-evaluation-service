@@ -1066,14 +1066,6 @@ def is_infrastructure_error(error: str | None) -> bool:
     return bool(error) and _INFRASTRUCTURE_ERROR_RE.search(error) is not None
 
 
-def has_no_data(result: Any) -> bool:
-    """No rows, or only NULLs (e.g. SUM over no rows): nothing to compare."""
-    if result is None or getattr(result, "truncated", False):
-        return False
-    rows = result.rows or []
-    return all(cell is None for row in rows for cell in row)
-
-
 async def evaluate_execution_match(
     context: Any,
     evaluator_name: str,
@@ -1086,9 +1078,10 @@ async def evaluate_execution_match(
     Score context.generated_result against context.expected_result.
 
     Not applicable (excluded from averages) when the golden SQL is missing or
-    fails to execute, when its result has no data (an empty answer matches
-    anything that also finds nothing), or when both results were truncated
-    by the executor — those say nothing about the agent.
+    fails to execute, or when both results were truncated by the executor —
+    those say nothing about the agent. A golden SQL that ran is always
+    compared, even when it found no rows or only NULLs: the generated result
+    must then be empty (or NULL) too.
     """
     from src.domain.entities.evaluation_result import EvaluationResult
 
@@ -1099,10 +1092,6 @@ async def evaluate_execution_match(
             evaluator_name,
             "expected_sql_execution_failed",
             error=getattr(context.expected_result, "error", None),
-        )
-    if has_no_data(context.expected_result):
-        return EvaluationResult.not_applicable(
-            evaluator_name, "golden_result_has_no_data"
         )
     if not context.generated_sql and context.generated_result is None:
         return EvaluationResult(

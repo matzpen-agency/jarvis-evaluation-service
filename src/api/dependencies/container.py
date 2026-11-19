@@ -58,7 +58,15 @@ from src.infrastructure.langfuse.text_to_sql_dataset_item_parser import (
 )
 from src.infrastructure.llm.llm_false_negative_judge import LlmFalseNegativeJudge
 from src.infrastructure.llm.llm_order_judge import LlmOrderJudge
+from src.infrastructure.text_to_sql_agent.agent_router import (
+    CURRENT_AGENT,
+    PREVIOUS_AGENT,
+    AgentRouter,
+)
 from src.infrastructure.text_to_sql_agent.mcp_agent_client import McpAgentClient
+from src.infrastructure.text_to_sql_agent.previous_agent_client import (
+    PreviousAgentClient,
+)
 from src.infrastructure.text_to_sql_agent.text_to_sql_agent_client import (
     TextToSqlAgentClient,
 )
@@ -419,7 +427,12 @@ def get_run_mcp_dataset_use_case(
         parser=parser,
         benchmark=_get_benchmark_provider(),
     )
-    agent_client = McpAgentClient(settings=settings)
+    agent_client = AgentRouter(
+        {
+            CURRENT_AGENT: McpAgentClient(settings=settings),
+            PREVIOUS_AGENT: PreviousAgentClient(settings=settings),
+        }
+    )
     reporter = LangfuseReporter(client=langfuse_client)
 
     runner = EvaluationRunner(

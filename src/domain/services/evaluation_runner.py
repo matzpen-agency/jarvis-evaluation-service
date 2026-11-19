@@ -283,6 +283,7 @@ class EvaluationRunner:
                 "numeric_tolerance": self._numeric_tolerance,
                 "connection_dialect": dialect,
                 "agent_dialect": self._agent_dialect,
+                "agent": agent_kwargs.get("agent") or "current",
                 "agent_model": agent_kwargs.get("model") or "default",
                 "generated_sql_engine": (
                     "agent_trino" if context.generated_on_agent_engine else "connection"

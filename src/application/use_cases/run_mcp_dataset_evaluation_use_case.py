@@ -94,7 +94,13 @@ class RunMcpDatasetEvaluationUseCase:
             # Forwarded through EvaluationRunner → agent_client.run(**kwargs)
             agent_kwargs={
                 "connection_id": request.connection_id,
-                **({"model": request.model} if request.model else {}),
+                # The previous agent has no model choice
+                **(
+                    {"model": request.model}
+                    if request.model and request.agent == "current"
+                    else {}
+                ),
+                **({"agent": request.agent} if request.agent != "current" else {}),
             },
             progress_callback=progress_callback,
             item_callback=(

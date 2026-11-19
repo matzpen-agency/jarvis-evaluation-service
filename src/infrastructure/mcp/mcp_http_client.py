@@ -54,8 +54,10 @@ class McpHttpClient:
         headers: dict[str, str] | None = None,
         timeout: float = 60.0,
         client_name: str = "jarvis-evaluation-service",
+        verify: bool | str = True,
     ) -> None:
         self._url = url
+        self._verify = verify
         self._timeout = timeout
         self._client_name = client_name
         self._headers = {
@@ -72,7 +74,7 @@ class McpHttpClient:
         validation) are returned with is_error=True. Transport failures raise
         httpx exceptions so callers can decide whether to retry.
         """
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with httpx.AsyncClient(timeout=self._timeout, verify=self._verify) as client:
             session_headers = await self._initialize(client)
             try:
                 request_id = str(uuid.uuid4())

@@ -78,6 +78,18 @@ class Settings(BaseSettings):
     # Numeric connection ID passed to chat_with_agent (matches JEEN_METADATA_CONNECTION_ID)
     MCP_AGENT_CONNECTION_ID: int = 0
 
+    # ── Previous agent (the earlier Text-to-SQL agent, chosen per evaluation) ──
+    # Its MCP server (Streamable HTTP) and the tool that answers a question
+    PREVIOUS_AGENT_MCP_URL: str = "https://mcp.np.agency.idf.cts/mcp"
+    PREVIOUS_AGENT_TOOL_NAME: str = "TextToSQL"
+    # Comma-separated "databases" argument. The previous agent works by
+    # database, not by connection, so every evaluation sends these.
+    PREVIOUS_AGENT_DATABASES: str = "home_command"
+    # TLS check: true, false, or a CA bundle path (the private network's CA)
+    PREVIOUS_AGENT_VERIFY: bool | str = True
+    # Optional bearer token, when the server asks for one
+    PREVIOUS_AGENT_TOKEN: SecretStr = SecretStr("")
+
     # SQL dialect the agent writes (it executes on Trino). Generated SQL that
     # fails on a connection with another dialect is retried transpiled.
     AGENT_SQL_DIALECT: str = "trino"

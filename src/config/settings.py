@@ -7,7 +7,7 @@ Supports Trino mTLS, basic auth, and no-auth modes.
 
 from __future__ import annotations
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -201,6 +201,24 @@ class Settings(BaseSettings):
             self.LANGFUSE_PUBLIC_KEY.get_secret_value()
             and self.LANGFUSE_SECRET_KEY.get_secret_value()
         )
+
+    @field_validator(
+        "TRINO_VERIFY", "AGENT_TRINO_VERIFY", "PREVIOUS_AGENT_VERIFY", mode="before"
+    )
+    @classmethod
+    def _verify_flag(cls, value: object) -> object:
+        """
+        "true"/"false" (and 1/0, yes/no, on/off) as booleans; anything else is a
+        CA bundle path. An env var is always text, and `bool | str` would keep
+        "false" as the path "false" ("[Errno 2] No such file or directory").
+        """
+        if isinstance(value, str):
+            word = value.strip().lower()
+            if word in ("false", "0", "no", "off"):
+                return False
+            if word in ("true", "1", "yes", "on"):
+                return True
+        return value
 
     @model_validator(mode="after")
     def _validate_trino_security(self) -> Settings:

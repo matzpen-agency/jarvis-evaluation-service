@@ -55,12 +55,47 @@ async def test_tool_error_is_an_agent_error(monkeypatch):
 
 
 @pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_missing_ca_file_says_which_setting_and_path(monkeypatch):
+    client = PreviousAgentClient(Settings(PREVIOUS_AGENT_VERIFY="/no/such/ca.crt"))
+    call = AsyncMock()
+    monkeypatch.setattr(client._mcp, "call_tool", call)
+    response = await client.run("q", [])
+    assert response.status == "error"
+    assert "PREVIOUS_AGENT_VERIFY" in response.error
+    assert "/no/such/ca.crt" in response.error
+    call.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("verify", "expected"),
+    [("true", True), ("false", False), (" False ", False), ("0", False)],
+)
+async def test_true_or_false_verify_is_not_a_file(monkeypatch, verify, expected):
+    monkeypatch.setenv("PREVIOUS_AGENT_VERIFY", verify)
+    settings = Settings()
+    assert settings.PREVIOUS_AGENT_VERIFY is expected
+    client = PreviousAgentClient(settings)
+    assert client._mcp._verify is expected
+    call = AsyncMock(
+        return_value=McpToolResult(is_error=False, text="SELECT 1", raw={})
+    )
+    monkeypatch.setattr(client._mcp, "call_tool", call)
+    assert (await client.run("q", [])).succeeded
+    call.assert_awaited_once()
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("text", "sql"),
     [
         ('{"sql": "SELECT a FROM t"}', "SELECT a FROM t"),
-        ('{"result": {"generated_sql": "WITH x AS (SELECT 1) SELECT * FROM x"}}',
-         "WITH x AS (SELECT 1) SELECT * FROM x"),
+        (
+            '{"result": {"generated_sql": "WITH x AS (SELECT 1) SELECT * FROM x"}}',
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+        ),
         ('{"answer": "Here:\\n```sql\\nSELECT 2\\n```"}', "SELECT 2"),
         ("The query is:\n```sql\nSELECT 3 FROM t\n```\nDone.", "SELECT 3 FROM t"),
         ("SELECT 4", "SELECT 4"),
@@ -74,7 +109,9 @@ def test_sql_is_found_in_any_answer_shape(text, sql):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("text", ["I could not answer that.", '{"error": "no table"}', None])
+@pytest.mark.parametrize(
+    "text", ["I could not answer that.", '{"error": "no table"}', None]
+)
 def test_answer_without_sql_fails(text):
     response = parse_answer(text, "t")
     assert response.sql_query is None

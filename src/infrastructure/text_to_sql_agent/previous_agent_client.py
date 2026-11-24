@@ -17,6 +17,7 @@ that holds it (sql_query, sql, ...), or from a ```sql block in the text.
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from typing import Any
@@ -55,7 +56,23 @@ class PreviousAgentClient(AgentClient):
             timeout=settings.AGENT_TIMEOUT,
             verify=settings.PREVIOUS_AGENT_VERIFY,
         )
+        self._verify = settings.PREVIOUS_AGENT_VERIFY
         self._max_attempts = 3
+
+    def _missing_ca_file(self) -> str | None:
+        """
+        Why the agent can't be reached when PREVIOUS_AGENT_VERIFY names a CA
+        file that isn't in this container (httpx would only say
+        "[Errno 2] No such file or directory"); None when it's fine.
+        """
+        if not isinstance(self._verify, str) or os.path.isfile(self._verify):
+            return None
+        return (
+            f"PREVIOUS_AGENT_VERIFY is the CA file {self._verify!r}, which isn't in "
+            "the evaluation service's container. Mount the private network's CA "
+            "there, point PREVIOUS_AGENT_VERIFY at where it is, or set it to "
+            "true (the system CAs) or false (no TLS check)."
+        )
 
     async def run(
         self,
@@ -64,6 +81,15 @@ class PreviousAgentClient(AgentClient):
         **kwargs: Any,
     ) -> AgentResponse:
         thread_id = kwargs.get("thread_id") or str(uuid.uuid4())
+        missing_ca = self._missing_ca_file()
+        if missing_ca:
+            logger.error("previous_agent.ca_file_missing", path=self._verify)
+            return AgentResponse(
+                thread_id=thread_id,
+                status="error",
+                error=missing_ca,
+                metadata={"agent": "previous"},
+            )
         arguments = {"query": query, "databases": self._databases}
         for attempt in range(1, self._max_attempts + 1):
             try:

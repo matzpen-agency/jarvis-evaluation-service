@@ -55,6 +55,9 @@ class PreviousAgentClient(AgentClient):
             headers={"Authorization": f"Bearer {token}"} if token else None,
             timeout=settings.AGENT_TIMEOUT,
             verify=settings.PREVIOUS_AGENT_VERIFY,
+            # Its server answers a call only after initialize,
+            # notifications/initialized and tools/list in the same session
+            list_tools_first=True,
         )
         self._verify = settings.PREVIOUS_AGENT_VERIFY
         self._url = settings.PREVIOUS_AGENT_MCP_URL

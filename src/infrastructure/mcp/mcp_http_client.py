@@ -3,9 +3,14 @@ mcp_http_client.py — Minimal MCP client for the Streamable HTTP transport.
 
 Each call opens a short-lived session:
   1. POST initialize                → InitializeResult (+ mcp-session-id header)
-  2. POST notifications/initialized → 202, empty body
-  3. POST tools/call                → JSON body or an SSE stream of messages
-  4. DELETE the session (best effort)
+  2. POST notifications/initialized → 202, empty body (with the session id)
+  3. POST tools/list                → only with list_tools_first (servers that
+                                      need it before a call, e.g. the Legacy agent)
+  4. POST tools/call                → JSON body or an SSE stream of messages
+  5. DELETE the session (best effort)
+
+Every request after initialize carries the mcp-session-id (when the server
+gave one) and the protocol version the server agreed to (MCP-Protocol-Version).
 
 Responses may arrive as a single JSON body or as SSE events; servers can emit
 notifications before the result, so the result is matched by JSON-RPC id.
@@ -55,8 +60,10 @@ class McpHttpClient:
         timeout: float = 60.0,
         client_name: str = "jarvis-evaluation-service",
         verify: bool | str = True,
+        list_tools_first: bool = False,
     ) -> None:
         self._url = url
+        self._list_tools_first = list_tools_first
         self._verify = verify
         self._timeout = timeout
         self._client_name = client_name
@@ -74,9 +81,13 @@ class McpHttpClient:
         validation) are returned with is_error=True. Transport failures raise
         httpx exceptions so callers can decide whether to retry.
         """
-        async with httpx.AsyncClient(timeout=self._timeout, verify=self._verify) as client:
+        async with httpx.AsyncClient(
+            timeout=self._timeout, verify=self._verify
+        ) as client:
             session_headers = await self._initialize(client)
             try:
+                if self._list_tools_first:
+                    await self._require_tool(client, session_headers, name)
                 request_id = str(uuid.uuid4())
                 response = await client.post(
                     self._url,
@@ -88,7 +99,7 @@ class McpHttpClient:
                     },
                     headers=session_headers,
                 )
-                response.raise_for_status()
+                self._raise_for_status(response, "tools/call")
                 message = self._extract_message(response, request_id)
             finally:
                 await self._close_session(client, session_headers)
@@ -111,24 +122,86 @@ class McpHttpClient:
             },
             headers=self._headers,
         )
-        response.raise_for_status()
+        self._raise_for_status(response, "initialize")
         message = self._extract_message(response, init_id)
         if "error" in message:
             raise McpProtocolError(f"MCP initialize failed: {message['error']}")
 
         session_id = response.headers.get("mcp-session-id")
-        session_headers = (
-            {**self._headers, "mcp-session-id": session_id}
-            if session_id
-            else dict(self._headers)
+        session_headers = dict(self._headers)
+        if session_id:
+            session_headers["mcp-session-id"] = session_id
+        protocol = (message.get("result") or {}).get("protocolVersion")
+        session_headers["MCP-Protocol-Version"] = protocol or _PROTOCOL_VERSION
+        logger.info(
+            "mcp_http_client.initialized",
+            url=self._url,
+            session_id=session_id,
+            protocol_version=session_headers["MCP-Protocol-Version"],
         )
         notified = await client.post(
             self._url,
             json={"jsonrpc": "2.0", "method": "notifications/initialized"},
             headers=session_headers,
         )
-        notified.raise_for_status()
+        self._raise_for_status(notified, "notifications/initialized")
         return session_headers
+
+    async def list_tools(self) -> list[str]:
+        """The names of the server's tools (initialize, initialized, tools/list)."""
+        async with httpx.AsyncClient(
+            timeout=self._timeout, verify=self._verify
+        ) as client:
+            session_headers = await self._initialize(client)
+            try:
+                return await self._tool_names(client, session_headers)
+            finally:
+                await self._close_session(client, session_headers)
+
+    async def _tool_names(
+        self, client: httpx.AsyncClient, session_headers: dict[str, str]
+    ) -> list[str]:
+        request_id = str(uuid.uuid4())
+        response = await client.post(
+            self._url,
+            json={
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/list",
+                "params": {},
+            },
+            headers=session_headers,
+        )
+        self._raise_for_status(response, "tools/list")
+        message = self._extract_message(response, request_id)
+        if "error" in message:
+            raise McpProtocolError(f"MCP tools/list failed: {message['error']}")
+        tools = (message.get("result") or {}).get("tools") or []
+        names = [t.get("name") for t in tools if isinstance(t, dict) and t.get("name")]
+        logger.info("mcp_http_client.tools_listed", url=self._url, tools=names)
+        return names
+
+    async def _require_tool(
+        self, client: httpx.AsyncClient, session_headers: dict[str, str], name: str
+    ) -> None:
+        names = await self._tool_names(client, session_headers)
+        if name not in names:
+            raise McpProtocolError(
+                f"The MCP server at {self._url} has no tool {name!r}; "
+                f"it has: {', '.join(names) or 'none'}"
+            )
+
+    def _raise_for_status(self, response: httpx.Response, step: str) -> None:
+        """raise_for_status, logging which handshake step the server refused."""
+        if response.is_error:
+            logger.error(
+                "mcp_http_client.step_failed",
+                url=self._url,
+                step=step,
+                status=response.status_code,
+                body=response.text[:500],
+            )
+        response.raise_for_status()
 
     async def _close_session(
         self, client: httpx.AsyncClient, session_headers: dict[str, str]
@@ -160,7 +233,9 @@ class McpHttpClient:
                 return message
         # Some servers don't echo the id; fall back to the first response-shaped message
         for message in messages:
-            if isinstance(message, dict) and ("result" in message or "error" in message):
+            if isinstance(message, dict) and (
+                "result" in message or "error" in message
+            ):
                 return message
         raise McpProtocolError("No JSON-RPC response found in MCP reply")
 
@@ -186,7 +261,7 @@ class McpHttpClient:
 
         for line in text.splitlines():
             if line.startswith("data:"):
-                data_lines.append(line[len("data:"):].strip())
+                data_lines.append(line[len("data:") :].strip())
             elif not line.strip():
                 _flush()
         _flush()

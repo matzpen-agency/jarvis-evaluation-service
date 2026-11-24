@@ -73,6 +73,7 @@ class RunDatasetCaseResultDTO(BaseModel):
     """Detailed evaluation result for a single case/question."""
 
     question_id: str
+    question: str | None = None
     generated_sql: str | None = None
     expected_sql: str | None = None
     succeeded: bool = False

@@ -142,3 +142,19 @@ def test_agent_latency_counts_only_questions_with_sql(aggregator, sample_dataset
 
     assert run.agent_latency.total_samples == 2
     assert run.agent_latency.average == 20_000.0
+
+
+@pytest.mark.unit
+def test_case_result_carries_the_question(sample_dataset_item):
+    """Callers that don't keep the questions (the studio, for BIRD) get it with the case."""
+    from src.application.use_cases.run_dataset_evaluation_use_case import (
+        RunDatasetEvaluationUseCase,
+    )
+
+    c = EvaluationContext(
+        dataset_item=sample_dataset_item, run_id="r", query="How many books?",
+        expected_sql="SELECT 1", allowed_tables=[],
+    )
+    case = MetricsAggregator.case_result(SampleRecord(context=c, results=[]))
+    assert case.question == "How many books?"
+    assert RunDatasetEvaluationUseCase.to_case_dto(case).question == "How many books?"

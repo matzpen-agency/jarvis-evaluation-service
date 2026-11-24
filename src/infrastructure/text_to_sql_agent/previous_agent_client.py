@@ -57,6 +57,7 @@ class PreviousAgentClient(AgentClient):
             verify=settings.PREVIOUS_AGENT_VERIFY,
         )
         self._verify = settings.PREVIOUS_AGENT_VERIFY
+        self._url = settings.PREVIOUS_AGENT_MCP_URL
         self._max_attempts = 3
 
     def _missing_ca_file(self) -> str | None:
@@ -95,6 +96,18 @@ class PreviousAgentClient(AgentClient):
             try:
                 result = await self._mcp.call_tool(self._tool, arguments)
                 break
+            except (httpx.TransportError, OSError) as exc:
+                # e.g. the host can't be reached, or the TLS check failed; say
+                # which URL and TLS setting were used
+                logger.error(
+                    "previous_agent.call_failed",
+                    url=self._url,
+                    verify=self._verify,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    attempt=attempt,
+                )
+                raise
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code not in (502, 503, 504) or (
                     attempt == self._max_attempts

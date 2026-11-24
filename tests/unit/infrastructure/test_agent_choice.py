@@ -222,3 +222,83 @@ async def test_use_case_forwards_the_deep_agent_and_its_model():
         "model": "gpt-oss:20b",
         "agent": "deep",
     }
+
+
+@pytest.mark.unit
+def test_tls_checks_say_how_each_setting_was_read(tmp_path):
+    ca = tmp_path / "ca.crt"
+    ca.write_text("x")
+    checks = Settings(
+        TRINO_VERIFY="true",
+        AGENT_TRINO_VERIFY=str(ca),
+        PREVIOUS_AGENT_VERIFY="/no/ca.crt",
+    ).tls_checks()
+    assert checks == [
+        {"setting": "TRINO_VERIFY", "mode": "on"},
+        {
+            "setting": "AGENT_TRINO_VERIFY",
+            "mode": "ca_file",
+            "path": str(ca),
+            "exists": True,
+        },
+        {
+            "setting": "PREVIOUS_AGENT_VERIFY",
+            "mode": "ca_file",
+            "path": "/no/ca.crt",
+            "exists": False,
+        },
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_startup_warns_about_a_missing_ca_file(monkeypatch):
+    from structlog.testing import capture_logs
+
+    import src.main as main
+
+    monkeypatch.setattr(
+        main,
+        "settings",
+        Settings(
+            TRINO_VERIFY="true",
+            AGENT_TRINO_VERIFY="false",
+            PREVIOUS_AGENT_VERIFY="/no/ca.crt",
+        ),
+    )
+    with capture_logs() as logs:
+        async with main.lifespan(main.app):
+            pass
+    missing = [
+        e for e in logs if e["event"] == "jarvis_evaluation_service.tls_ca_file_missing"
+    ]
+    assert [(e["setting"], e["path"], e["log_level"]) for e in missing] == [
+        ("PREVIOUS_AGENT_VERIFY", "/no/ca.crt", "warning")
+    ]
+    assert any(
+        e["event"] == "jarvis_evaluation_service.tls_setting"
+        and e["setting"] == "TRINO_VERIFY"
+        for e in logs
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_an_unreachable_agent_is_logged_with_its_url_and_tls_setting(monkeypatch):
+    import httpx
+    from structlog.testing import capture_logs
+
+    client = PreviousAgentClient(
+        Settings(
+            PREVIOUS_AGENT_VERIFY="false",
+            PREVIOUS_AGENT_MCP_URL="https://agent.test/mcp",
+        )
+    )
+    monkeypatch.setattr(
+        client._mcp, "call_tool", AsyncMock(side_effect=httpx.ConnectError("no route"))
+    )
+    with capture_logs() as logs, pytest.raises(httpx.ConnectError):
+        await client.run("q", [])
+    failed = [e for e in logs if e["event"] == "previous_agent.call_failed"]
+    assert failed and failed[0]["url"] == "https://agent.test/mcp"
+    assert failed[0]["verify"] is False and failed[0]["error_type"] == "ConnectError"

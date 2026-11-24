@@ -7,6 +7,8 @@ Supports Trino mTLS, basic auth, and no-auth modes.
 
 from __future__ import annotations
 
+import os
+
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -219,6 +221,27 @@ class Settings(BaseSettings):
             if word in ("true", "1", "yes", "on"):
                 return True
         return value
+
+    def tls_checks(self) -> list[dict[str, object]]:
+        """
+        How each TLS setting was read, for the startup log: "on" (system CAs),
+        "off" (no check) or "ca_file" with whether that file is in the container.
+        """
+        checks: list[dict[str, object]] = []
+        for name in ("TRINO_VERIFY", "AGENT_TRINO_VERIFY", "PREVIOUS_AGENT_VERIFY"):
+            value = getattr(self, name)
+            if isinstance(value, bool):
+                checks.append({"setting": name, "mode": "on" if value else "off"})
+            else:
+                checks.append(
+                    {
+                        "setting": name,
+                        "mode": "ca_file",
+                        "path": value,
+                        "exists": os.path.isfile(value),
+                    }
+                )
+        return checks
 
     @model_validator(mode="after")
     def _validate_trino_security(self) -> Settings:

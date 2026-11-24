@@ -140,7 +140,11 @@ class Settings(BaseSettings):
     BACKEND_TIMEOUT: float = 30.0
 
     # ── Evaluation ────────────────────────────────────────────────────────────
-    MAX_CONCURRENT_EVALUATIONS: int = 1
+    # Questions evaluated at the same time. Each one keeps an agent call open
+    # for minutes, so one at a time made a 150-question BIRD run take hours;
+    # the agent's Trino and Jeen queries have their own, lower limits
+    # (AGENT_TRINO_MAX_CONCURRENT_QUERIES, JEEN_MAX_CONCURRENT_QUERIES).
+    MAX_CONCURRENT_EVALUATIONS: int = 4
     EVALUATION_HITL_ENABLED: bool = False
     # Budget for executing both SQLs and running all evaluators for one item
     # (the agent call has its own AGENT_TIMEOUT)

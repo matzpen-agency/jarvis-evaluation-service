@@ -454,6 +454,13 @@ class EvaluationRunner:
             context.metadata["total_execution_time_ms"] = (
                 context.generated_result.execution_time_ms
             )
+            if context.error == "sql_execution_failure":
+                # The agent didn't finish normally, but its SQL ran: a wrong
+                # result is a wrong answer, not an error
+                context.metadata["agent_status"] = (
+                    context.agent_response.status if context.agent_response else None
+                )
+                context.error = None
         if context.expected_result is not None and not context.expected_result.success:
             context.metadata["expected_sql_error"] = context.expected_result.error
 

@@ -149,3 +149,25 @@ def test_validation_failure(analyzer, sample_context):
     assert analysis.total_failures == 1
     assert analysis.validation_failure_count == 1
     assert analysis.validation_failure_rate == 1.0
+
+
+@pytest.mark.unit
+def test_unfinished_agent_whose_sql_ran_is_not_an_execution_failure(
+    analyzer, sample_dataset_item
+):
+    from src.domain.entities.query_result import QueryResult
+
+    ctx = EvaluationContext(
+        dataset_item=sample_dataset_item,
+        run_id="run-1",
+        query="q",
+        expected_sql="SELECT 1",
+        allowed_tables=[],
+    )
+    ctx.agent_response = AgentResponse(
+        thread_id="t", status="error", sql_query="SELECT 2", error="stopped"
+    )
+    ctx.expected_result = QueryResult(success=True, rows=[[1]], columns=["a"])
+    ctx.generated_result = QueryResult(success=True, rows=[[2]], columns=["a"])
+    analysis = analyzer.calculate([ctx])
+    assert analysis.sql_execution_failure_count == 0

@@ -3,8 +3,8 @@ test_golden_sql_fixes.py — Golden SQL that can't be judged as written.
 
   - Golden SQL that treats Postgres money as a number is retried with money
     columns cast to numeric.
-  - A golden result with no data (no rows, or only NULLs) makes the
-    result-based scores not applicable.
+  - A golden result with no data (no rows, or only NULLs) is still compared:
+    the generated result has to find nothing too.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from src.domain.evaluators.execution_accuracy_evaluator import (
 )
 from src.domain.evaluators.sql_comparison_utils import (
     cast_money_to_numeric,
-    has_no_data,
 )
 from src.domain.evaluators.time_shift_evaluator import TimeShiftEvaluator
 from src.domain.services.evaluation_engine import EvaluationEngine
@@ -144,16 +143,6 @@ def _result(rows, truncated=False):
                        row_count=len(rows), truncated=truncated)
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("rows", "truncated", "expected"),
-    [([], False, True), ([[None]], False, True), ([[None, None]], False, True),
-     ([[0]], False, False), ([["x"]], False, False), ([], True, False)],
-)
-def test_has_no_data(rows, truncated, expected):
-    assert has_no_data(_result(rows, truncated)) is expected
-
-
 def _ctx(sample_dataset_item, expected_rows, generated_rows) -> EvaluationContext:
     ctx = EvaluationContext(
         dataset_item=sample_dataset_item,
@@ -174,26 +163,34 @@ def _ctx(sample_dataset_item, expected_rows, generated_rows) -> EvaluationContex
 @pytest.mark.unit
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("expected_rows", "generated_rows"), [([[None]], [[0.0]]), ([], [])]
+    ("expected_rows", "generated_rows", "score"),
+    [
+        ([], [], 1.0),  # both found nothing
+        ([[None]], [[None]], 1.0),  # SUM over no rows, both NULL
+        ([], [[5.0]], 0.0),  # golden empty, agent found rows
+        ([[None]], [[0.0]], 0.0),  # NULL vs 0: a strict mismatch (the LLM judge can still accept it)
+    ],
 )
 @pytest.mark.parametrize("evaluator_cls", [ContainsEvaluator, ExecutionAccuracyEvaluator])
-async def test_golden_without_data_is_not_applicable(
-    sample_dataset_item, evaluator_cls, expected_rows, generated_rows
+async def test_golden_without_data_is_still_evaluated(
+    sample_dataset_item, evaluator_cls, expected_rows, generated_rows, score
 ):
     result = await evaluator_cls().evaluate(_ctx(sample_dataset_item, expected_rows, generated_rows))
-    assert result.applicable is False
-    assert result.details["reason"] == "golden_result_has_no_data"
+    assert result.applicable is True
+    assert result.score == score
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_time_shift_skips_golden_without_data(sample_dataset_item):
+async def test_time_shift_runs_on_golden_without_data(sample_dataset_item):
     executor = AsyncMock()
-    result = await TimeShiftEvaluator(query_executor=executor).evaluate(
-        _ctx(sample_dataset_item, [[None]], [[0.0]])
+    executor.execute = AsyncMock(return_value=_result([]))
+    result = await TimeShiftEvaluator(query_executor=executor, offsets_days=[-7]).evaluate(
+        _ctx(sample_dataset_item, [], [])
     )
-    assert result.applicable is False
-    executor.execute.assert_not_called()
+    assert result.applicable is True
+    assert result.score == 1.0
+    executor.execute.assert_called()
 
 
 @pytest.mark.unit

@@ -154,6 +154,7 @@ class RunDatasetEvaluationUseCase:
 
         return RunDatasetCaseResultDTO(
             question_id=case.question_id,
+            question=getattr(case, "question", None),
             generated_sql=case.generated_sql,
             expected_sql=case.expected_sql,
             succeeded=case.succeeded,

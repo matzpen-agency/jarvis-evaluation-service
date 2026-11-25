@@ -28,6 +28,7 @@ from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
 from src.domain.entities.query_result import QueryResult
 from src.domain.evaluators.sql_comparison_utils import (
+    adapt_sqlite_benchmark_sql,
     cast_money_to_numeric,
     transpile_sql,
 )
@@ -37,6 +38,7 @@ from src.domain.services.metrics_aggregator import MetricsAggregator, SampleReco
 from src.ports.agent_client import AgentClient
 from src.ports.connection_metadata_provider import ConnectionMetadataProvider
 from src.ports.dataset_provider import DatasetProvider
+from src.ports.false_negative_judge import FalseNegativeJudge
 from src.ports.query_executor import AgentSqlExecutor, QueryExecutor
 from src.ports.trace_reporter import TraceReporter
 
@@ -47,6 +49,8 @@ ItemCallback = Callable[[SampleRecord], None]
 
 # Upper bound for reporting one sample to Langfuse (link retries included)
 _REPORT_TIMEOUT_SECONDS = 180.0
+# The LLM judge's result name (a second look at questions contains accuracy failed)
+JUDGE_NAME = "llm_judge"
 
 
 class EvaluationRunner:
@@ -71,6 +75,9 @@ class EvaluationRunner:
         agent_dialect: str = "trino",
         numeric_tolerance: int = 6,
         agent_executor: AgentSqlExecutor | None = None,
+        expected_on_agent_engine: bool = True,
+        false_negative_judge: FalseNegativeJudge | None = None,
+        judge_min_confidence: int = 80,
     ) -> None:
         self._dataset_provider = dataset_provider
         self._agent_client = agent_client
@@ -85,6 +92,9 @@ class EvaluationRunner:
         self._agent_dialect = agent_dialect
         self._numeric_tolerance = numeric_tolerance
         self._agent_executor = agent_executor
+        self._expected_on_agent_engine = expected_on_agent_engine
+        self._false_negative_judge = false_negative_judge
+        self._judge_min_confidence = judge_min_confidence
 
     async def run(
         self,
@@ -185,7 +195,9 @@ class EvaluationRunner:
                 try:
                     callback(*args)
                 except Exception as exc:
-                    logger.warning("evaluation_runner.progress_callback_failed", error=str(exc))
+                    logger.warning(
+                        "evaluation_runner.progress_callback_failed", error=str(exc)
+                    )
             return record
 
         records: list[SampleRecord] = await asyncio.gather(
@@ -271,6 +283,8 @@ class EvaluationRunner:
                 "numeric_tolerance": self._numeric_tolerance,
                 "connection_dialect": dialect,
                 "agent_dialect": self._agent_dialect,
+                "agent": agent_kwargs.get("agent") or "current",
+                "agent_model": agent_kwargs.get("model") or "default",
                 "generated_sql_engine": (
                     "agent_trino" if context.generated_on_agent_engine else "connection"
                 ),
@@ -326,20 +340,41 @@ class EvaluationRunner:
     def _adapt_expected_sql(context: EvaluationContext) -> None:
         """
         Benchmark gold SQL is written for its own engine (BIRD: SQLite);
-        transpile it to the connection's dialect before it is executed.
+        transpile it to the connection's dialect before it is executed. A
+        benchmark database loaded into one schema of the connection
+        ("sql_schema") also gets SQLite's case-insensitive names and LIKE,
+        and, when pushed to dataverse, its tables' and columns' dataverse names
+        ("sql_db_id").
         """
-        source_dialect = (context.dataset_item.metadata or {}).get("sql_dialect")
-        if not source_dialect or not context.dialect or source_dialect == context.dialect:
+        metadata = context.dataset_item.metadata or {}
+        source_dialect = metadata.get("sql_dialect")
+        schema = metadata.get("sql_schema")
+        if schema and source_dialect == "sqlite":
+            transpiled = adapt_sqlite_benchmark_sql(
+                context.expected_sql,
+                schema,
+                context.dialect or "postgres",
+                db_id=metadata.get("sql_db_id"),
+            )
+        elif (
+            not source_dialect
+            or not context.dialect
+            or source_dialect == context.dialect
+        ):
             return
-        transpiled = transpile_sql(
-            context.expected_sql, read=source_dialect, write=context.dialect
-        )
+        else:
+            transpiled = transpile_sql(
+                context.expected_sql, read=source_dialect, write=context.dialect
+            )
         if transpiled:
             context.metadata["original_expected_sql"] = context.expected_sql
             context.expected_sql = transpiled
 
     def _error_results(self, error: str) -> list[EvaluationResult]:
-        return [EvaluationResult.from_error(name, error) for name in self._engine.evaluator_names]
+        return [
+            EvaluationResult.from_error(name, error)
+            for name in self._engine.evaluator_names
+        ]
 
     async def _run_agent(self, context: EvaluationContext, agent_kwargs: dict) -> None:
         """Call the agent; failures are recorded on the context, never raised."""
@@ -360,7 +395,9 @@ class EvaluationRunner:
             context.timed_out = True
             context.agent_call_timed_out = True
             context.error = "agent_call_timed_out"
-            logger.warning("evaluation_runner.agent_timeout", item_id=context.dataset_item.id)
+            logger.warning(
+                "evaluation_runner.agent_timeout", item_id=context.dataset_item.id
+            )
             return
         except Exception as exc:
             context.agent_crashed = True
@@ -397,7 +434,9 @@ class EvaluationRunner:
             if val is not None:
                 context.metadata[key] = val
 
-    async def _execute_and_evaluate(self, context: EvaluationContext) -> list[EvaluationResult]:
+    async def _execute_and_evaluate(
+        self, context: EvaluationContext
+    ) -> list[EvaluationResult]:
         """Execute expected and generated SQL, then run every evaluator."""
         coros = []
         if context.expected_sql:
@@ -407,20 +446,122 @@ class EvaluationRunner:
         if coros:
             await asyncio.gather(*coros)
         await self._count_truncated_results(context)
+        context.metadata.setdefault("evaluation_config", {})["expected_sql_engine"] = (
+            "agent_trino" if context.expected_on_agent_engine else "connection"
+        )
 
         if context.generated_result and context.generated_result.success:
-            context.metadata["total_execution_time_ms"] = context.generated_result.execution_time_ms
+            context.metadata["total_execution_time_ms"] = (
+                context.generated_result.execution_time_ms
+            )
+            if context.error == "sql_execution_failure":
+                # The agent didn't finish normally, but its SQL ran: a wrong
+                # result is a wrong answer, not an error
+                context.metadata["agent_status"] = (
+                    context.agent_response.status if context.agent_response else None
+                )
+                context.error = None
         if context.expected_result is not None and not context.expected_result.success:
             context.metadata["expected_sql_error"] = context.expected_result.error
 
-        return await self._engine.run_all(context)
+        results = await self._engine.run_all(context)
+        await self._judge_failed_question(context, results)
+        return results
+
+    async def _judge_failed_question(
+        self, context: EvaluationContext, results: list[EvaluationResult]
+    ) -> None:
+        """
+        When contains accuracy failed the question, ask the LLM judge whether
+        the generated result answers the question anyway. Its verdict is added
+        as the "llm_judge" result; a confident "false negative" (confidence at
+        least judge_min_confidence) turns contains accuracy into a pass, and
+        the original verdict is kept in its details.
+        """
+        if self._false_negative_judge is None:
+            return
+        contains = next(
+            (r for r in results if r.evaluator_name == "contains_accuracy"), None
+        )
+        if (
+            contains is None
+            or not contains.applicable
+            or contains.passed
+            or contains.error
+        ):
+            return
+        generated = context.generated_result
+        if (
+            generated is None
+            or not generated.success
+            or context.expected_result is None
+        ):
+            results.append(
+                EvaluationResult.not_applicable(JUDGE_NAME, "generated_sql_did_not_run")
+            )
+            return
+
+        reason = str(contains.details.get("reason") or "results_differ")
+        verdict = await self._false_negative_judge.judge(
+            question=context.query,
+            expected=context.expected_result,
+            generated=generated,
+            failure_reason=reason,
+            failure_details=contains.details,
+        )
+        details = {
+            "is_false_negative": verdict.is_false_negative,
+            "confidence": verdict.confidence,
+            "min_confidence": self._judge_min_confidence,
+            "reasoning": verdict.reasoning,
+            "key_differences": verdict.key_differences,
+            "judged_failure_reason": reason,
+            "model": verdict.model,
+            "prompt_name": verdict.prompt_name,
+            "prompt_version": verdict.prompt_version,
+        }
+        if verdict.error:
+            results.append(
+                EvaluationResult.not_applicable(
+                    JUDGE_NAME, "judge_unavailable", error=verdict.error, **details
+                )
+            )
+            return
+
+        overturned = (
+            bool(verdict.is_false_negative)
+            and (verdict.confidence or 0) >= self._judge_min_confidence
+        )
+        details["overturned"] = overturned
+        results.append(
+            EvaluationResult(
+                evaluator_name=JUDGE_NAME,
+                score=1.0 if overturned else 0.0,
+                passed=overturned,
+                details=details,
+            )
+        )
+        if overturned:
+            contains.details["overturned_by_llm_judge"] = True
+            contains.details["original_score"] = contains.score
+            contains.score = 1.0
+            contains.passed = True
 
     async def _execute_expected(self, context: EvaluationContext) -> None:
         """
-        Run the golden SQL on the connection. Golden SQL that treats Postgres
-        money as a number (avg(money), money = integer…) is rejected by the
+        Run the golden SQL where the agent's SQL runs, so both results come
+        from the same engine; when it can't run there, run it on the
+        connection. On the connection, golden SQL that treats Postgres money
+        as a number (avg(money), money = integer…) is rejected by the
         database; retry it once with money columns cast to numeric.
         """
+        if (
+            self._expected_on_agent_engine
+            and context.generated_on_agent_engine
+            and await self._execute_expected_on_agent_engine(context)
+        ):
+            return
+
         sql = context.expected_sql
         result = await self._safe_execute(sql, context.connection_id)
         context.executed_expected_sql = sql
@@ -428,7 +569,9 @@ class EvaluationRunner:
         if result.success or "money" not in (result.error or "").lower():
             return
 
-        rewritten = cast_money_to_numeric(sql, context.schema_map, context.dialect or "postgres")
+        rewritten = cast_money_to_numeric(
+            sql, context.schema_map, context.dialect or "postgres"
+        )
         if rewritten == sql:
             return
         retry = await self._safe_execute(rewritten, context.connection_id)
@@ -438,8 +581,62 @@ class EvaluationRunner:
             context.expected_result = retry
             context.metadata["expected_sql_money_cast"] = True
             logger.info(
-                "evaluation_runner.expected_sql_money_cast", item_id=context.dataset_item.id
+                "evaluation_runner.expected_sql_money_cast",
+                item_id=context.dataset_item.id,
             )
+
+    async def _execute_expected_on_agent_engine(
+        self, context: EvaluationContext
+    ) -> bool:
+        """
+        Run the golden SQL on the agent's engine, transpiled from the
+        connection's dialect. Money columns are cast to numbers up front: that
+        engine reads them as text ('$1,234.56'), which golden SQL would sort,
+        compare or aggregate as strings. Returns False (reason in metadata)
+        when it can't run there.
+        """
+        sql = context.expected_sql or ""
+        if context.dialect and context.dialect != context.agent_dialect:
+            sql = (
+                transpile_sql(sql, read=context.dialect, write=context.agent_dialect)
+                or ""
+            )
+        if not sql:
+            context.metadata["expected_sql_agent_engine_error"] = (
+                f"could not transpile the golden SQL from {context.dialect} to "
+                f"{context.agent_dialect}"
+            )
+            return False
+
+        candidates = [sql]
+        with_numeric_money = cast_money_to_numeric(
+            sql, context.schema_map, context.agent_dialect
+        )
+        if with_numeric_money != sql:
+            candidates.insert(0, with_numeric_money)
+
+        result = None
+        for candidate in candidates:
+            result = await self._safe_execute(
+                candidate, context.connection_id, self._agent_executor
+            )
+            if result.success:
+                context.executed_expected_sql = candidate
+                context.expected_result = result
+                context.expected_on_agent_engine = True
+                if candidate is with_numeric_money:
+                    context.metadata["expected_sql_money_cast"] = True
+                return True
+
+        context.metadata["expected_sql_agent_engine_error"] = (
+            result.error if result else None
+        )
+        logger.info(
+            "evaluation_runner.expected_sql_agent_engine_failed",
+            item_id=context.dataset_item.id,
+            error=result.error if result else None,
+        )
+        return False
 
     async def _execute_generated(self, context: EvaluationContext) -> None:
         """
@@ -459,9 +656,15 @@ class EvaluationRunner:
         context.executed_generated_sql = sql
         context.generated_result = result
 
-        if result.success or not context.dialect or context.dialect == context.agent_dialect:
+        if (
+            result.success
+            or not context.dialect
+            or context.dialect == context.agent_dialect
+        ):
             return
-        transpiled = transpile_sql(sql, read=context.agent_dialect, write=context.dialect)
+        transpiled = transpile_sql(
+            sql, read=context.agent_dialect, write=context.dialect
+        )
         if not transpiled or transpiled.strip() == sql.strip():
             return
 
@@ -489,7 +692,9 @@ class EvaluationRunner:
         generated_sql = context.executed_generated_sql or context.generated_sql or ""
         exp_total, gen_total = await asyncio.gather(
             self._count_rows(
-                context.executed_expected_sql or context.expected_sql, context.connection_id
+                context.executed_expected_sql or context.expected_sql,
+                context.connection_id,
+                self._agent_executor if context.expected_on_agent_engine else None,
             ),
             self._count_rows(
                 generated_sql,

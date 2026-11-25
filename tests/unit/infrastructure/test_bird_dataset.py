@@ -73,7 +73,12 @@ def loader(tmp_path) -> BirdDatasetLoader:
 
 
 def _qr(rows, columns=("v",), truncated=False) -> QueryResult:
-    return QueryResult(success=True, rows=[list(r) for r in rows], columns=list(columns), truncated=truncated)
+    return QueryResult(
+        success=True,
+        rows=[list(r) for r in rows],
+        columns=list(columns),
+        truncated=truncated,
+    )
 
 
 # ── loader ────────────────────────────────────────────────────────────────────
@@ -143,26 +148,42 @@ async def test_use_case_resolves_bird_from_connection_name(loader):
     metadata = AsyncMock()
     metadata.get_connection_name = AsyncMock(return_value="bird_movie_platform")
     use_case = RunMcpDatasetEvaluationUseCase(
-        runner=runner, metadata_provider=metadata, benchmark=BirdBenchmarkProvider(loader)
+        runner=runner,
+        metadata_provider=metadata,
+        benchmark=BirdBenchmarkProvider(loader),
     )
 
     with pytest.raises(RuntimeError, match="stop"):
-        await use_case.execute(RunMcpDatasetRequest(dataset_name="bird", connection_id=7))
+        await use_case.execute(
+            RunMcpDatasetRequest(dataset_name="bird", connection_id=7)
+        )
     assert runner.run.await_args.kwargs["dataset_name"] == "bird-movie_platform"
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_connection_with_no_bird_name_is_a_clear_error(loader):
+@pytest.mark.parametrize(
+    ("name", "error"),
+    [
+        ("AdventureWorksDW", "doesn't hold a BIRD database"),
+        # Jeen couldn't be asked for the name
+        (None, "Couldn't get the connection's name from Jeen"),
+    ],
+)
+async def test_connection_with_no_bird_name_is_a_clear_error(loader, name, error):
     runner = AsyncMock(spec=EvaluationRunner)
     metadata = AsyncMock()
-    metadata.get_connection_name = AsyncMock(return_value=None)
+    metadata.get_connection_name = AsyncMock(return_value=name)
     use_case = RunMcpDatasetEvaluationUseCase(
-        runner=runner, metadata_provider=metadata, benchmark=BirdBenchmarkProvider(loader)
+        runner=runner,
+        metadata_provider=metadata,
+        benchmark=BirdBenchmarkProvider(loader),
     )
 
-    with pytest.raises(DatasetNotFoundError, match="Name the connection after the BIRD db_id"):
-        await use_case.execute(RunMcpDatasetRequest(dataset_name="bird", connection_id=7))
+    with pytest.raises(DatasetNotFoundError, match=error):
+        await use_case.execute(
+            RunMcpDatasetRequest(dataset_name="bird", connection_id=7)
+        )
     runner.run.assert_not_called()
 
 
@@ -178,7 +199,11 @@ class _OtherBenchmark(BenchmarkProvider):
         return f"spider-{connection_name}"
 
     async def load(self, dataset_name):
-        return [DatasetItem(id="s1", input={"query": "q"}, expected_output={"sql": "SELECT 1"})]
+        return [
+            DatasetItem(
+                id="s1", input={"query": "q"}, expected_output={"sql": "SELECT 1"}
+            )
+        ]
 
     def description(self, dataset_name):
         return "other benchmark"
@@ -197,7 +222,9 @@ async def test_another_benchmark_plugs_in_through_the_port():
     )
 
     with pytest.raises(RuntimeError, match="stop"):
-        await use_case.execute(RunMcpDatasetRequest(dataset_name="spider", connection_id=7))
+        await use_case.execute(
+            RunMcpDatasetRequest(dataset_name="spider", connection_id=7)
+        )
     assert runner.run.await_args.kwargs["dataset_name"] == "spider-concert_singer"
 
     client = AsyncMock()
@@ -207,7 +234,9 @@ async def test_another_benchmark_plugs_in_through_the_port():
     assert [i.id for i in await provider.get_dataset("spider-concert_singer")] == ["s1"]
     # "bird" is no longer special once BIRD isn't the configured benchmark
     with pytest.raises(RuntimeError, match="stop"):
-        await use_case.execute(RunMcpDatasetRequest(dataset_name="bird", connection_id=7))
+        await use_case.execute(
+            RunMcpDatasetRequest(dataset_name="bird", connection_id=7)
+        )
     assert runner.run.await_args.kwargs["dataset_name"] == "bird"
 
 
@@ -226,8 +255,11 @@ def test_bundled_dataset_loads_without_network(monkeypatch):
     bird = _get_benchmark_provider()._loader
     assert len(bird.db_ids()) == 69
     items = [i for db in bird.db_ids() for i in bird.load(db)]
-    assert len(items) == 2462
-    assert len({i.id for i in items}) == 2462
+    # bundled databases keep only questions whose gold SQL survives translation
+    assert len(items) == 2462 - 28
+    assert len({i.id for i in items}) == len(items)
+    assert bird.bundled_db_ids() == ["books", "car_retails", "retail_world"]
+    assert len(bird.load_bundled()) == 150
     assert all(i.expected_sql and i.metadata["grading_method"] for i in items)
 
 
@@ -255,8 +287,11 @@ def test_parse_grading_method(raw, grading):
 @pytest.mark.unit
 def test_set_grading_ignores_duplicates_and_order():
     score, _ = compare_results(
-        _qr([[1], [2], [2]]), _qr([[2], [1]]), allow_extra_columns=True,
-        requires_ordering=True, grading=Grading("set"),
+        _qr([[1], [2], [2]]),
+        _qr([[2], [1]]),
+        allow_extra_columns=True,
+        requires_ordering=True,
+        grading=Grading("set"),
     )
     assert score == 1.0
 
@@ -264,7 +299,10 @@ def test_set_grading_ignores_duplicates_and_order():
 @pytest.mark.unit
 def test_list_grading_enforces_order():
     score, details = compare_results(
-        _qr([[1], [2]]), _qr([[2], [1]]), allow_extra_columns=True, grading=Grading("list")
+        _qr([[1], [2]]),
+        _qr([[2], [1]]),
+        allow_extra_columns=True,
+        grading=Grading("list"),
     )
     assert score == 0.0
     assert details["reason"] == "row_order_mismatch"
@@ -283,7 +321,10 @@ def test_list_grading_enforces_order():
 def test_subset_grading(generated, expected_score):
     expected = _qr([["a"], ["b"], ["c"], ["d"]], ["title"])
     score, _ = compare_results(
-        expected, _qr(generated, ["name"]), allow_extra_columns=True, grading=Grading("subset", "=", 3)
+        expected,
+        _qr(generated, ["name"]),
+        allow_extra_columns=True,
+        grading=Grading("subset", "=", 3),
     )
     assert score == expected_score
 
@@ -292,11 +333,16 @@ def test_subset_grading(generated, expected_score):
 @pytest.mark.asyncio
 async def test_contains_uses_the_items_grading_method(sample_dataset_item):
     item = DatasetItem(
-        id="bird-12", input={"query": "q"}, expected_output={"sql": "SELECT movie_title FROM movies"},
+        id="bird-12",
+        input={"query": "q"},
+        expected_output={"sql": "SELECT movie_title FROM movies"},
         metadata={"grading_method": "subset,=,1"},
     )
     ctx = EvaluationContext(
-        dataset_item=item, run_id="r", query="q", expected_sql="SELECT movie_title FROM movies",
+        dataset_item=item,
+        run_id="r",
+        query="q",
+        expected_sql="SELECT movie_title FROM movies",
         allowed_tables=[],
     )
     ctx.generated_sql = "SELECT movie_title FROM movies LIMIT 1"
@@ -313,8 +359,12 @@ async def test_contains_uses_the_items_grading_method(sample_dataset_item):
 def test_sqlite_gold_sql_is_transpiled_for_the_connection(loader):
     item = loader.load("movie_platform")[0]
     ctx = EvaluationContext(
-        dataset_item=item, run_id="r", query=item.query, expected_sql=item.expected_sql,
-        allowed_tables=[], dialect="postgres",
+        dataset_item=item,
+        run_id="r",
+        query=item.query,
+        expected_sql=item.expected_sql,
+        allowed_tables=[],
+        dialect="postgres",
     )
     EvaluationRunner._adapt_expected_sql(ctx)
     assert "`" not in ctx.expected_sql

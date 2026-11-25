@@ -55,6 +55,9 @@ class EvaluationContext:
     # True when generated SQL runs on the agent's own engine (see
     # AgentSqlExecutor) instead of the connection: it stays in agent_dialect
     generated_on_agent_engine: bool = False
+    # The golden SQL ran there too (transpiled to agent_dialect), so both
+    # results come from the same engine
+    expected_on_agent_engine: bool = False
 
     # ── Execution results ─────────────────────────────────────────────────────
     expected_result: QueryResult | None = None

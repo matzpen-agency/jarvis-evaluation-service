@@ -7,7 +7,9 @@ Supports Trino mTLS, basic auth, and no-auth modes.
 
 from __future__ import annotations
 
-from pydantic import Field, SecretStr, model_validator
+import os
+
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,9 +47,10 @@ class Settings(BaseSettings):
     # ── Agent's Trino: where the agent's generated SQL is executed ──────────
     # The agent writes and tests its SQL on its own Trino, where column types
     # can differ from the connection's database (Postgres money → varchar).
-    # Connections listed here run the generated SQL on that Trino, in the
-    # given catalog ("6=adventureworks,7=sales"); the golden SQL and all other
-    # connections still run on the connection through Jeen.
+    # Catalog every connection's SQL runs in on that Trino — the agent's
+    # TRINO_CATALOG (e.g. "dataverse"). Empty: only AGENT_TRINO_CATALOGS run there.
+    AGENT_TRINO_CATALOG: str = ""
+    # Per-connection exceptions to AGENT_TRINO_CATALOG ("6=adventureworks,7=sales")
     AGENT_TRINO_CATALOGS: str = ""
     AGENT_TRINO_HOST: str | None = None
     AGENT_TRINO_PORT: int = 443
@@ -60,6 +63,11 @@ class Settings(BaseSettings):
     AGENT_TRINO_REQUEST_TIMEOUT: float = 60.0
     # Same cap as Jeen run_query, so both results are truncated alike
     AGENT_TRINO_MAX_ROWS: int = 1000
+    # Queries run on the agent's Trino at once (its databases have few connections)
+    AGENT_TRINO_MAX_CONCURRENT_QUERIES: int = 2
+    # Run the golden SQL on the agent's Trino too (transpiled), so both results
+    # come from the same engine; falls back to the connection when it can't run there
+    EXPECTED_SQL_ON_AGENT_ENGINE: bool = True
 
     # ── Agent (legacy REST chat endpoint) ───────────────────────────────────────
     AGENT_URL: str = "http://localhost:8000"
@@ -71,6 +79,18 @@ class Settings(BaseSettings):
     MCP_AGENT_URL: str = "http://localhost:8001"
     # Numeric connection ID passed to chat_with_agent (matches JEEN_METADATA_CONNECTION_ID)
     MCP_AGENT_CONNECTION_ID: int = 0
+
+    # ── Previous agent (the earlier Text-to-SQL agent, chosen per evaluation) ──
+    # Its MCP server (Streamable HTTP) and the tool that answers a question
+    PREVIOUS_AGENT_MCP_URL: str = "https://mcp.np.agency.idf.cts/mcp"
+    PREVIOUS_AGENT_TOOL_NAME: str = "TextToSQL"
+    # Comma-separated "databases" argument. The previous agent works by
+    # database, not by connection, so every evaluation sends these.
+    PREVIOUS_AGENT_DATABASES: str = "home_command"
+    # TLS check: true, false, or a CA bundle path (the private network's CA)
+    PREVIOUS_AGENT_VERIFY: bool | str = True
+    # Optional bearer token, when the server asks for one
+    PREVIOUS_AGENT_TOKEN: SecretStr = SecretStr("")
 
     # SQL dialect the agent writes (it executes on Trino). Generated SQL that
     # fails on a connection with another dialect is retried transpiled.
@@ -103,13 +123,28 @@ class Settings(BaseSettings):
     # Saved decisions per question (stable across runs); relative to project root
     ORDER_JUDGE_CACHE_PATH: str = "data/order_judgments.json"
 
+    # ── LLM judge (second look at questions contains accuracy failed) ─────────
+    # Name of the Langfuse text prompt (label "production") the judge uses,
+    # uploaded with scripts/upload_judge_prompt.py. Empty: no judge.
+    LLM_JUDGE_PROMPT_NAME: str = ""
+    # Model for the judge; empty: LLM_MODEL
+    LLM_JUDGE_MODEL: str = ""
+    # A "false negative" verdict turns the question into a pass only at this
+    # confidence (0-100) or above
+    LLM_JUDGE_MIN_CONFIDENCE: int = 80
+    LLM_JUDGE_TIMEOUT: float = 120.0
+
     # ── Backend (for resolving production tables and query execution) ─────────
     BACKEND_URL: str = "http://localhost:8000"
     BACKEND_QUERY_ENDPOINT: str = "/api/query/execute"
     BACKEND_TIMEOUT: float = 30.0
 
     # ── Evaluation ────────────────────────────────────────────────────────────
-    MAX_CONCURRENT_EVALUATIONS: int = 1
+    # Questions evaluated at the same time. Each one keeps an agent call open
+    # for minutes, so one at a time made a 150-question BIRD run take hours;
+    # the agent's Trino and Jeen queries have their own, lower limits
+    # (AGENT_TRINO_MAX_CONCURRENT_QUERIES, JEEN_MAX_CONCURRENT_QUERIES).
+    MAX_CONCURRENT_EVALUATIONS: int = 4
     EVALUATION_HITL_ENABLED: bool = False
     # Budget for executing both SQLs and running all evaluators for one item
     # (the agent call has its own AGENT_TIMEOUT)
@@ -137,6 +172,14 @@ class Settings(BaseSettings):
     BIRD_DATASET_PATH: str = "src/config/bird/bird_verified_cot_2462.jsonl"
     # Append each question's "evidence" hint, as in BIRD's standard setting
     BIRD_INCLUDE_EVIDENCE: bool = True
+    # Bundled BIRD databases (<db_id>.sqlite) that load_bird_databases copies
+    # into a connection's database, one schema "<prefix><db_id>" each
+    BIRD_DATABASES_DIR: str = "src/config/bird/databases"
+    BIRD_SCHEMA_PREFIX: str = "bird_"
+    # Set when every BIRD database was pushed to dataverse with
+    # push_bird_to_oasis (e.g. "agency__bird-public-benchmark"): gold SQL then
+    # reads "<schema>".<db_id>__<table> with cleaned column names
+    BIRD_DATAVERSE_SCHEMA: str = ""
 
     # Numeric tolerance for result comparison (decimal places)
     NUMERIC_COMPARISON_TOLERANCE: int = 6
@@ -164,6 +207,45 @@ class Settings(BaseSettings):
             self.LANGFUSE_PUBLIC_KEY.get_secret_value()
             and self.LANGFUSE_SECRET_KEY.get_secret_value()
         )
+
+    @field_validator(
+        "TRINO_VERIFY", "AGENT_TRINO_VERIFY", "PREVIOUS_AGENT_VERIFY", mode="before"
+    )
+    @classmethod
+    def _verify_flag(cls, value: object) -> object:
+        """
+        "true"/"false" (and 1/0, yes/no, on/off) as booleans; anything else is a
+        CA bundle path. An env var is always text, and `bool | str` would keep
+        "false" as the path "false" ("[Errno 2] No such file or directory").
+        """
+        if isinstance(value, str):
+            word = value.strip().lower()
+            if word in ("false", "0", "no", "off"):
+                return False
+            if word in ("true", "1", "yes", "on"):
+                return True
+        return value
+
+    def tls_checks(self) -> list[dict[str, object]]:
+        """
+        How each TLS setting was read, for the startup log: "on" (system CAs),
+        "off" (no check) or "ca_file" with whether that file is in the container.
+        """
+        checks: list[dict[str, object]] = []
+        for name in ("TRINO_VERIFY", "AGENT_TRINO_VERIFY", "PREVIOUS_AGENT_VERIFY"):
+            value = getattr(self, name)
+            if isinstance(value, bool):
+                checks.append({"setting": name, "mode": "on" if value else "off"})
+            else:
+                checks.append(
+                    {
+                        "setting": name,
+                        "mode": "ca_file",
+                        "path": value,
+                        "exists": os.path.isfile(value),
+                    }
+                )
+        return checks
 
     @model_validator(mode="after")
     def _validate_trino_security(self) -> Settings:

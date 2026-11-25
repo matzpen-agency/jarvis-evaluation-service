@@ -55,6 +55,17 @@ async def lifespan(app: FastAPI):
         langfuse_configured=settings.is_langfuse_configured,
         trino_enabled=settings.TRINO_ENABLED,
     )
+    # How each TLS setting was read, so a wrong value shows at startup rather
+    # than as "[Errno 2] No such file or directory" on every question
+    for check in settings.tls_checks():
+        if check.get("exists") is False:
+            logger.warning(
+                "jarvis_evaluation_service.tls_ca_file_missing",
+                **check,
+                hint="Mount the CA file at this path, or set the setting to true/false.",
+            )
+        else:
+            logger.info("jarvis_evaluation_service.tls_setting", **check)
     yield
     logger.info("jarvis_evaluation_service.shutdown")
 

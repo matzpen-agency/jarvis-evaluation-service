@@ -180,6 +180,7 @@ class MetricsAggregator:
 
         return DatasetCaseResult(
             question_id=record.context.dataset_item.id,
+            question=record.context.query,
             generated_sql=record.context.generated_sql,
             expected_sql=record.context.expected_sql,
             succeeded=record.context.succeeded,

@@ -156,3 +156,35 @@ async def test_persistent_rate_limit_eventually_fails(client, monkeypatch):
     assert result.success is False
     assert "429" in result.error
     assert client._mcp.call_tool.await_count == 6
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_schema_map_marks_dates_kept_as_text(client):
+    """Text columns that hold dates are typed for the time shift."""
+    columns = [
+        {"table": "payment", "column_name": "payment_date", "data_type": "VARCHAR",
+         "example_values": ["2021-05-10", "2017-01-25"]},
+        {"table": "payment", "column_name": "paid_at", "data_type": "varchar(30)",
+         "example_values": ["2021-05-10 08:30:00", "2021-05-11"]},
+        {"table": "payment", "column_name": "open_date", "data_type": "varchar", "example_values": []},
+        {"table": "payment", "column_name": "status", "data_type": "varchar",
+         "example_values": ["paid", "late"]},
+        {"table": "payment", "column_name": "candidate_note", "data_type": "varchar",
+         "example_values": ["2021-05-10", "n/a"]},
+        {"table": "payment", "column_name": "code", "data_type": "varchar"},
+        {"table": "payment", "column_name": "year", "data_type": "integer",
+         "example_values": ["2021"]},
+    ]
+    client._mcp.call_tool = AsyncMock(return_value=_ok({"columns": columns}))
+
+    schema = await client.get_table_schema_map(18)
+    assert schema["payment"] == {
+        "payment_date": "date_string",
+        "paid_at": "timestamp_string",
+        "open_date": "date_string",
+        "status": "varchar",
+        "candidate_note": "varchar",
+        "code": "varchar",
+        "year": "integer",
+    }

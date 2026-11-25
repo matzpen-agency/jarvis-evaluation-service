@@ -98,6 +98,8 @@ class DatasetCaseResult:
     generated_sql: str | None = None
     expected_sql: str | None = None
     succeeded: bool = False
+    # the question as asked, for callers that don't keep the questions (e.g. BIRD)
+    question: str | None = None
     error: str | None = None
     scores: dict[str, float] = field(default_factory=dict)
     # evaluators that could not judge this case (e.g. golden SQL failed)

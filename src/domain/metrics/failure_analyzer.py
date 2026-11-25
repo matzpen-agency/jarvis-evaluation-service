@@ -45,7 +45,10 @@ class FailureAnalyzer(BaseMetricCalculator[list[EvaluationContext], FailureAnaly
                 agent_crash.append(ts)
             elif ctx.timed_out:
                 timeout.append(ts)
-            elif ctx.agent_response is None or not ctx.agent_response.succeeded:
+            elif ctx.agent_response is None or (
+                not ctx.agent_response.succeeded
+                and not (ctx.generated_result and ctx.generated_result.success)
+            ):
                 sql_exec.append(ts)
             elif (
                 (ctx.expected_result and not ctx.expected_result.success)

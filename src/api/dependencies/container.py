@@ -56,8 +56,18 @@ from src.infrastructure.langfuse.langfuse_reporter import LangfuseReporter
 from src.infrastructure.langfuse.text_to_sql_dataset_item_parser import (
     TextToSqlDatasetItemParser,
 )
+from src.infrastructure.llm.llm_false_negative_judge import LlmFalseNegativeJudge
 from src.infrastructure.llm.llm_order_judge import LlmOrderJudge
+from src.infrastructure.text_to_sql_agent.agent_router import (
+    CURRENT_AGENT,
+    DEEP_AGENT,
+    PREVIOUS_AGENT,
+    AgentRouter,
+)
 from src.infrastructure.text_to_sql_agent.mcp_agent_client import McpAgentClient
+from src.infrastructure.text_to_sql_agent.previous_agent_client import (
+    PreviousAgentClient,
+)
 from src.infrastructure.text_to_sql_agent.text_to_sql_agent_client import (
     TextToSqlAgentClient,
 )
@@ -68,6 +78,7 @@ from src.infrastructure.trino.agent_trino_query_executor import (
 from src.infrastructure.trino.trino_query_executor import TrinoQueryExecutor
 from src.ports.benchmark_provider import BenchmarkProvider
 from src.ports.connection_metadata_provider import ConnectionMetadataProvider
+from src.ports.false_negative_judge import FalseNegativeJudge
 from src.ports.order_judge import OrderJudge
 from src.ports.query_executor import AgentSqlExecutor, QueryExecutor
 
@@ -101,6 +112,9 @@ def _get_benchmark_provider() -> BenchmarkProvider:
         BirdDatasetLoader(
             path=_project_path(settings.BIRD_DATASET_PATH),
             include_evidence=settings.BIRD_INCLUDE_EVIDENCE,
+            databases_dir=_project_path(settings.BIRD_DATABASES_DIR),
+            schema_prefix=settings.BIRD_SCHEMA_PREFIX,
+            dataverse_schema=settings.BIRD_DATAVERSE_SCHEMA,
         )
     )
 
@@ -108,7 +122,9 @@ def _get_benchmark_provider() -> BenchmarkProvider:
 def _project_path(path: str) -> str:
     if os.path.isabs(path):
         return path
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    project_root = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    )
     return os.path.join(project_root, path)
 
 
@@ -129,6 +145,27 @@ def _get_order_judge() -> OrderJudge | None:
     )
 
 
+@lru_cache
+def _get_false_negative_judge() -> FalseNegativeJudge | None:
+    """The LLM judge for failed questions, or None when LLM_JUDGE_PROMPT_NAME,
+    an LLM key or Langfuse (where the prompt lives) is missing."""
+    settings = get_settings()
+    api_key = settings.llm_api_key
+    if not settings.LLM_JUDGE_PROMPT_NAME or not api_key:
+        return None
+    langfuse_client = _get_cached_langfuse_client()
+    if langfuse_client is None:
+        return None
+    return LlmFalseNegativeJudge(
+        langfuse_client=langfuse_client,
+        prompt_name=settings.LLM_JUDGE_PROMPT_NAME,
+        base_url=settings.LLM_BASE_URL,
+        api_key=api_key,
+        model=settings.LLM_JUDGE_MODEL or settings.LLM_MODEL,
+        timeout=settings.LLM_JUDGE_TIMEOUT,
+    )
+
+
 def _verify_value(value: bool | str) -> bool | str:
     if isinstance(value, str):
         if value.lower() in ("false", "0", "no", "off"):
@@ -140,11 +177,11 @@ def _verify_value(value: bool | str) -> bool | str:
 
 @lru_cache
 def _get_agent_executor() -> AgentSqlExecutor | None:
-    """Executor for generated SQL on the agent's own Trino, or None when no
-    connection is mapped to an agent Trino catalog."""
+    """Executor for SQL on the agent's own Trino, or None when it isn't
+    configured (no host, or neither a default catalog nor per-connection ones)."""
     settings = get_settings()
     catalogs = parse_catalog_map(settings.AGENT_TRINO_CATALOGS)
-    if not catalogs or not settings.AGENT_TRINO_HOST:
+    if not (catalogs or settings.AGENT_TRINO_CATALOG) or not settings.AGENT_TRINO_HOST:
         return None
 
     def _connection_factory(catalog: str):
@@ -169,6 +206,8 @@ def _get_agent_executor() -> AgentSqlExecutor | None:
         connection_factory=_connection_factory,
         catalogs=catalogs,
         max_rows=settings.AGENT_TRINO_MAX_ROWS,
+        default_catalog=settings.AGENT_TRINO_CATALOG,
+        max_concurrent_queries=settings.AGENT_TRINO_MAX_CONCURRENT_QUERIES,
     )
 
 
@@ -230,7 +269,9 @@ def _get_trino_query_executor(settings: Settings) -> QueryExecutor:
                 settings.TRINO_USER, trino_password
             )
         if settings.TRINO_CERT_PATH and settings.TRINO_KEY_PATH:
-            kwargs["auth"] = trino.auth.CertificateAuthentication(settings.TRINO_CERT_PATH, settings.TRINO_KEY_PATH)
+            kwargs["auth"] = trino.auth.CertificateAuthentication(
+                settings.TRINO_CERT_PATH, settings.TRINO_KEY_PATH
+            )
         return trino.dbapi.connect(**kwargs)
 
     return TrinoQueryExecutor(
@@ -293,6 +334,8 @@ def get_evaluation_engine(
             shift_timeout_seconds=settings.TIME_SHIFT_TIMEOUT,
             order_judge=_get_order_judge(),
             agent_executor=_get_agent_executor(),
+            false_negative_judge=_get_false_negative_judge(),
+            judge_min_confidence=settings.LLM_JUDGE_MIN_CONFIDENCE,
         ),
         ComponentMatchEvaluator(),
         SchemaValidityEvaluator(table_resolver=table_resolver),
@@ -356,6 +399,9 @@ def get_run_dataset_use_case(
         agent_dialect=settings.AGENT_SQL_DIALECT,
         numeric_tolerance=settings.NUMERIC_COMPARISON_TOLERANCE,
         agent_executor=_get_agent_executor(),
+        expected_on_agent_engine=settings.EXPECTED_SQL_ON_AGENT_ENGINE,
+        false_negative_judge=_get_false_negative_judge(),
+        judge_min_confidence=settings.LLM_JUDGE_MIN_CONFIDENCE,
     )
 
     return RunDatasetEvaluationUseCase(
@@ -382,7 +428,13 @@ def get_run_mcp_dataset_use_case(
         parser=parser,
         benchmark=_get_benchmark_provider(),
     )
-    agent_client = McpAgentClient(settings=settings)
+    agent_client = AgentRouter(
+        {
+            CURRENT_AGENT: McpAgentClient(settings=settings),
+            DEEP_AGENT: McpAgentClient.deep_agent(settings),
+            PREVIOUS_AGENT: PreviousAgentClient(settings=settings),
+        }
+    )
     reporter = LangfuseReporter(client=langfuse_client)
 
     runner = EvaluationRunner(
@@ -399,6 +451,9 @@ def get_run_mcp_dataset_use_case(
         agent_dialect=settings.AGENT_SQL_DIALECT,
         numeric_tolerance=settings.NUMERIC_COMPARISON_TOLERANCE,
         agent_executor=_get_agent_executor(),
+        expected_on_agent_engine=settings.EXPECTED_SQL_ON_AGENT_ENGINE,
+        false_negative_judge=_get_false_negative_judge(),
+        judge_min_confidence=settings.LLM_JUDGE_MIN_CONFIDENCE,
     )
 
     return RunMcpDatasetEvaluationUseCase(

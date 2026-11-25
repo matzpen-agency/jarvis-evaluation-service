@@ -158,3 +158,120 @@ async def test_run_with_agent_exception(
     assert mock_query_executor.execute.call_count == 1
     assert mock_query_executor.execute.call_args.args[0] == ctx.expected_sql
     mock_reporter.report_sample.assert_called_once()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_concurrency", [1, 4])
+async def test_questions_run_at_the_same_time_up_to_the_limit(
+    max_concurrency,
+    successful_agent_response,
+    mock_query_executor,
+    mock_reporter,
+    mock_engine,
+    mock_aggregator,
+):
+    """Agent calls overlap, max_concurrency at a time and no more."""
+    import asyncio
+
+    from src.domain.entities.dataset_item import DatasetItem
+
+    items = [
+        DatasetItem(id=f"q{i}", input={"query": f"q{i}?"}, expected_output={"sql": "SELECT 1"})
+        for i in range(8)
+    ]
+    provider = AsyncMock()
+    provider.get_dataset = AsyncMock(return_value=items)
+
+    running = peak = 0
+
+    async def slow_agent(**_):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.05)
+        running -= 1
+        return successful_agent_response
+
+    agent = AsyncMock()
+    agent.run = AsyncMock(side_effect=slow_agent)
+    runner = EvaluationRunner(
+        dataset_provider=provider,
+        agent_client=agent,
+        query_executor=mock_query_executor,
+        reporter=mock_reporter,
+        evaluation_engine=mock_engine,
+        metrics_aggregator=mock_aggregator,
+        max_concurrency=max_concurrency,
+    )
+
+    await runner.run(dataset_name="d", allowed_tables=[], run_name="r")
+
+    assert agent.run.call_count == 8
+    assert peak == max_concurrency
+
+
+def _unfinished_agent() -> AsyncMock:
+    """An agent that gave SQL but didn't finish normally (e.g. stopped after a Trino error)."""
+    agent = AsyncMock()
+    agent.run = AsyncMock(
+        return_value=AgentResponse(
+            thread_id="t", status="error", sql_query="SELECT 2", error="stopped"
+        )
+    )
+    return agent
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_unfinished_agent_whose_sql_runs_has_no_error(
+    mock_dataset_provider, mock_query_executor, mock_reporter, mock_engine, mock_aggregator
+):
+    runner = EvaluationRunner(
+        dataset_provider=mock_dataset_provider,
+        agent_client=_unfinished_agent(),
+        query_executor=mock_query_executor,
+        reporter=mock_reporter,
+        evaluation_engine=mock_engine,
+        metrics_aggregator=mock_aggregator,
+    )
+
+    await runner.run(dataset_name="test-dataset", allowed_tables=["orders"])
+
+    ctx = mock_engine.run_all.call_args[0][0]
+    assert ctx.generated_result.success
+    assert ctx.error is None
+    assert ctx.metadata["agent_status"] == "error"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_unfinished_agent_whose_sql_fails_keeps_the_error(
+    mock_dataset_provider,
+    successful_query_result,
+    mock_reporter,
+    mock_engine,
+    mock_aggregator,
+):
+    from src.domain.entities.query_result import QueryResult
+
+    async def execute(sql, *args, **kwargs):
+        if sql == "SELECT 2":
+            return QueryResult(success=False, error="line 1: syntax error")
+        return successful_query_result
+
+    executor = AsyncMock()
+    executor.execute = AsyncMock(side_effect=execute)
+    runner = EvaluationRunner(
+        dataset_provider=mock_dataset_provider,
+        agent_client=_unfinished_agent(),
+        query_executor=executor,
+        reporter=mock_reporter,
+        evaluation_engine=mock_engine,
+        metrics_aggregator=mock_aggregator,
+    )
+
+    await runner.run(dataset_name="test-dataset", allowed_tables=["orders"])
+
+    ctx = mock_engine.run_all.call_args[0][0]
+    assert ctx.error == "sql_execution_failure"

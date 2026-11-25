@@ -9,6 +9,8 @@ itself uses that to resolve the appropriate schema/tables via jeen-metadata.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -35,6 +37,25 @@ class RunMcpDatasetRequest(BaseModel):
         default=None,
         description="Optional list of specific item IDs to evaluate.",
         examples=[["q-1", "q-2"]],
+    )
+    model: str | None = Field(
+        default=None,
+        description=(
+            "LLM model the agent uses for every question (one the agent's list_models "
+            "returns). Omit for the agent's default."
+        ),
+        examples=["gemma4:e4b"],
+    )
+    agent: Literal["current", "deep", "previous"] = Field(
+        default="current",
+        description=(
+            "Which Text-to-SQL agent answers the questions: the current, "
+            "connection-based agent (chat_with_agent), the Deep Agent "
+            "(deep_agent, same MCP server; needs an agent from "
+            "feature/deep-agent-updated), or the previous TextToSQL agent "
+            "(which always looks in PREVIOUS_AGENT_DATABASES and ignores model)."
+        ),
+        examples=["current"],
     )
     limit: int | None = Field(
         default=None,

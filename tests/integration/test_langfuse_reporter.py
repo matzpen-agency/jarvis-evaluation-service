@@ -418,3 +418,33 @@ async def test_run_summary_has_agent_generation_time(mock_langfuse_sdk_client):
     assert values["avg_agent_sql_generation_seconds"] == 25.5
     assert values["p50_agent_sql_generation_seconds"] == 20.0
     assert values["p95_agent_sql_generation_seconds"] == 41.0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_agent_reason_and_trace_are_reported(mock_langfuse_sdk_client, sample_dataset_item):
+    """A question without SQL links to the agent's own trace and says why."""
+    reporter = LangfuseReporter(client=mock_langfuse_sdk_client)
+    ctx = _sample_context(sample_dataset_item)
+    ctx.generated_sql = None
+    ctx.error = "agent_gave_no_answer: no_answer (none of the agent's SQL ran)"
+    ctx.metadata.update(
+        agent_trace_id="agent-trace-1",
+        agent_verification="no_answer",
+        agent_executed=False,
+        agent_execution_path=["deep:execute_trino_query"],
+        agent_summary="no final answer",
+    )
+
+    await reporter.report_sample(
+        context=ctx, results=[], parent_trace_id="p", dataset_item_id="item-001", run_name="run"
+    )
+
+    spans = {c.kwargs["name"]: c.kwargs for c in mock_langfuse_sdk_client.start_span.call_args_list}
+    agent = spans["agent_execution"]
+    assert agent["output"]["error"] == ctx.error
+    assert agent["metadata"]["agent_trace_id"] == "agent-trace-1"
+    assert agent["metadata"]["agent_execution_path"] == ["deep:execute_trino_query"]
+    sample = next(v for k, v in spans.items() if k.startswith("eval-sample:"))
+    assert sample["metadata"]["agent_trace_id"] == "agent-trace-1"
+    assert sample["metadata"]["agent_summary"] == "no final answer"

@@ -275,3 +275,76 @@ async def test_unfinished_agent_whose_sql_fails_keeps_the_error(
 
     ctx = mock_engine.run_all.call_args[0][0]
     assert ctx.error == "sql_execution_failure"
+
+
+async def _agent_without_sql(
+    response: AgentResponse,
+    mock_dataset_provider,
+    mock_query_executor,
+    mock_reporter,
+    mock_engine,
+    mock_aggregator,
+):
+    agent = AsyncMock()
+    agent.run = AsyncMock(return_value=response)
+    runner = EvaluationRunner(
+        dataset_provider=mock_dataset_provider,
+        agent_client=agent,
+        query_executor=mock_query_executor,
+        reporter=mock_reporter,
+        evaluation_engine=mock_engine,
+        metrics_aggregator=mock_aggregator,
+    )
+    await runner.run(dataset_name="test-dataset", allowed_tables=["orders"])
+    return mock_engine.run_all.call_args[0][0]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_deep_agent_without_an_answer_says_why(
+    mock_dataset_provider, mock_query_executor, mock_reporter, mock_engine, mock_aggregator
+):
+    """The Deep agent wrote SQL but none of it ran, so it submitted no answer."""
+    response = AgentResponse(
+        thread_id="t",
+        status="completed",
+        summary="לא התקבלה תשובה סופית.",
+        metadata={
+            "verification": "no_answer",
+            "executed": False,
+            "trace_id": "agent-trace-1",
+            "execution_path": ["deep:execute_trino_query", "deep:task"],
+        },
+    )
+    ctx = await _agent_without_sql(
+        response, mock_dataset_provider, mock_query_executor, mock_reporter,
+        mock_engine, mock_aggregator,
+    )
+    assert ctx.error == "agent_gave_no_answer: no_answer (none of the agent's SQL ran)"
+    assert ctx.metadata["agent_trace_id"] == "agent-trace-1"
+    assert ctx.metadata["agent_verification"] == "no_answer"
+    assert ctx.metadata["agent_executed"] is False
+    assert ctx.metadata["agent_summary"] == "לא התקבלה תשובה סופית."
+    assert ctx.metadata["agent_execution_path"] == ["deep:execute_trino_query", "deep:task"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        ({"verification": "rejected", "executed": True}, "agent_gave_no_answer: rejected"),
+        ({"is_unanswerable": True}, "agent_found_the_question_unanswerable"),
+        ({}, "agent_did_not_produce_sql"),
+    ],
+)
+async def test_reason_for_no_sql(
+    metadata, expected,
+    mock_dataset_provider, mock_query_executor, mock_reporter, mock_engine, mock_aggregator,
+):
+    response = AgentResponse(thread_id="t", status="completed", metadata=metadata)
+    ctx = await _agent_without_sql(
+        response, mock_dataset_provider, mock_query_executor, mock_reporter,
+        mock_engine, mock_aggregator,
+    )
+    assert ctx.error == expected

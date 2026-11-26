@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 
 import structlog
 
+from src.domain.entities.agent_response import AgentResponse
 from src.domain.entities.dataset_run import DatasetRun
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
@@ -51,6 +52,25 @@ ItemCallback = Callable[[SampleRecord], None]
 _REPORT_TIMEOUT_SECONDS = 180.0
 # The LLM judge's result name (a second look at questions contains accuracy failed)
 JUDGE_NAME = "llm_judge"
+
+
+def _no_sql_reason(agent_response: AgentResponse) -> str:
+    """Why an agent that finished without an error gave no SQL.
+
+    The Deep agent says it in "verification": no_answer when it submitted no
+    answer (e.g. none of its queries ran), rejected when its answer failed
+    verification, and so on; "executed" false means none of its SQL ran.
+    """
+    meta = agent_response.metadata
+    verification = meta.get("verification")
+    if verification:
+        reason = f"agent_gave_no_answer: {verification}"
+        if meta.get("executed") is False:
+            reason += " (none of the agent's SQL ran)"
+        return reason
+    if meta.get("is_unanswerable"):
+        return "agent_found_the_question_unanswerable"
+    return "agent_did_not_produce_sql"
 
 
 class EvaluationRunner:
@@ -420,7 +440,21 @@ class EvaluationRunner:
                 # after a Trino error). The SQL still exists and will be evaluated.
                 context.error = "sql_execution_failure"
             else:
-                context.error = agent_response.error or "agent_did_not_produce_sql"
+                context.error = agent_response.error or _no_sql_reason(agent_response)
+
+        # What the agent said about its run, so a question without SQL can be
+        # traced to the agent's own trace and its reason
+        for key, name in (
+            ("trace_id", "agent_trace_id"),
+            ("verification", "agent_verification"),
+            ("executed", "agent_executed"),
+            ("execution_path", "agent_execution_path"),
+        ):
+            val = agent_response.metadata.get(key)
+            if val is not None and val != []:
+                context.metadata[name] = val
+        if agent_response.sql_query is None and agent_response.summary:
+            context.metadata["agent_summary"] = agent_response.summary[:2000]
 
         for key in (
             "refiner_iteration_count",

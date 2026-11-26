@@ -9,7 +9,7 @@ itself uses that to resolve the appropriate schema/tables via jeen-metadata.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -56,6 +56,16 @@ class RunMcpDatasetRequest(BaseModel):
             "(which always looks in PREVIOUS_AGENT_DATABASES and ignores model)."
         ),
         examples=["current"],
+    )
+    time_shift_offsets_days: list[Annotated[int, Field(ge=-36500, le=36500)]] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=20,
+        description=(
+            "The time shift's offsets in days for this run (negative = into the past, "
+            "e.g. the days back to a given date). Omit for the configured ones."
+        ),
+        examples=[[-1, -7, -14, -30, -60, -1146]],
     )
     limit: int | None = Field(
         default=None,

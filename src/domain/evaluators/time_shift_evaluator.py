@@ -5,7 +5,8 @@ A generated query can match the expected result today by accident — e.g. it
 hard-codes '2026-09-01' where the golden SQL says "last month", or it reads a
 different date column that happens to give the same rows on this snapshot.
 
-For each configured offset (e.g. -1, -7, -14, -30, -60 days):
+For each offset (e.g. -1, -7, -14, -30, -60 days; a run may choose its own,
+such as the days back to a given date):
   1. Wrap both expected and (executed) generated SQL with CTEs that shift
      every date/timestamp column of the referenced tables by the offset,
      rendered in the connection's dialect.
@@ -121,7 +122,8 @@ class TimeShiftEvaluator(BaseEvaluator):
         )
 
         shifted_pairs = []
-        for offset in self._offsets:
+        offsets = context.time_shift_offsets_days or self._offsets
+        for offset in offsets:
             expected_shifted = dynamically_wrap_with_yaml_cte(
                 expected_sql, offset, schema_map, expected_dialect
             )

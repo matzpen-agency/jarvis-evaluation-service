@@ -20,6 +20,7 @@ import httpx
 import structlog
 
 from src.domain.entities.query_result import QueryResult
+from src.domain.services.rate_limit import is_rate_limit, wait_before_retry
 from src.ports.false_negative_judge import FalseNegativeJudge, JudgeVerdict
 
 logger = structlog.get_logger(__name__)
@@ -185,7 +186,9 @@ class LlmFalseNegativeJudge(FalseNegativeJudge):
         headers = {"Authorization": f"Bearer {self._api_key}"}
         last_error: Exception | None = None
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            for attempt in range(1, _MAX_ATTEMPTS + 1):
+            attempt = rate_limited = 0
+            while attempt < _MAX_ATTEMPTS:
+                attempt += 1
                 try:
                     response = await client.post(
                         self._url, json=payload, headers=headers
@@ -209,10 +212,14 @@ class LlmFalseNegativeJudge(FalseNegativeJudge):
                     return verdict
                 except httpx.HTTPStatusError as exc:
                     last_error = exc
-                    if (
-                        exc.response.status_code < 500
-                        and exc.response.status_code != 429
-                    ):
+                    if is_rate_limit(exc):
+                        # Wait out the provider's rate limit (raises when out of
+                        # retries or stopped); it doesn't use up the other attempts
+                        rate_limited += 1
+                        await wait_before_retry("llm_judge", rate_limited, exc)
+                        attempt -= 1
+                        continue
+                    if exc.response.status_code < 500:
                         break
                 except (httpx.TransportError, ValueError, KeyError) as exc:
                     last_error = exc

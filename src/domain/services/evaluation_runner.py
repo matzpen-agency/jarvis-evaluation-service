@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 
 import structlog
 
+from src.domain.entities.agent_response import AgentResponse
 from src.domain.entities.dataset_run import DatasetRun
 from src.domain.entities.evaluation_context import EvaluationContext
 from src.domain.entities.evaluation_result import EvaluationResult
@@ -35,6 +36,18 @@ from src.domain.evaluators.sql_comparison_utils import (
 from src.domain.services.deadline import run_with_deadline
 from src.domain.services.evaluation_engine import EvaluationEngine
 from src.domain.services.metrics_aggregator import MetricsAggregator, SampleRecord
+from src.domain.services.rate_limit import (
+    QuestionScope,
+    RateLimitExhaustedError,
+    RateLimitPolicy,
+    RateLimitStoppedError,
+    RateLimitTracker,
+    current_question,
+    enter_question,
+    is_rate_limit,
+    leave_question,
+    wait_before_retry,
+)
 from src.ports.agent_client import AgentClient
 from src.ports.connection_metadata_provider import ConnectionMetadataProvider
 from src.ports.dataset_provider import DatasetProvider
@@ -51,6 +64,25 @@ ItemCallback = Callable[[SampleRecord], None]
 _REPORT_TIMEOUT_SECONDS = 180.0
 # The LLM judge's result name (a second look at questions contains accuracy failed)
 JUDGE_NAME = "llm_judge"
+
+
+def _no_sql_reason(agent_response: AgentResponse) -> str:
+    """Why an agent that finished without an error gave no SQL.
+
+    The Deep agent says it in "verification": no_answer when it submitted no
+    answer (e.g. none of its queries ran), rejected when its answer failed
+    verification, and so on; "executed" false means none of its SQL ran.
+    """
+    meta = agent_response.metadata
+    verification = meta.get("verification")
+    if verification:
+        reason = f"agent_gave_no_answer: {verification}"
+        if meta.get("executed") is False:
+            reason += " (none of the agent's SQL ran)"
+        return reason
+    if meta.get("is_unanswerable"):
+        return "agent_found_the_question_unanswerable"
+    return "agent_did_not_produce_sql"
 
 
 class EvaluationRunner:
@@ -78,7 +110,9 @@ class EvaluationRunner:
         expected_on_agent_engine: bool = True,
         false_negative_judge: FalseNegativeJudge | None = None,
         judge_min_confidence: int = 80,
+        rate_limit_policy: RateLimitPolicy | None = None,
     ) -> None:
+        self._rate_limit_policy = rate_limit_policy or RateLimitPolicy()
         self._dataset_provider = dataset_provider
         self._agent_client = agent_client
         self._query_executor = query_executor
@@ -107,6 +141,8 @@ class EvaluationRunner:
         agent_kwargs: dict | None = None,
         progress_callback: ProgressCallback | None = None,
         item_callback: ItemCallback | None = None,
+        rate_limits: RateLimitTracker | None = None,
+        time_shift_offsets_days: list[int] | None = None,
     ) -> DatasetRun:
         """
         Execute full evaluation of a named dataset.
@@ -122,6 +158,10 @@ class EvaluationRunner:
                 the connection that expected/generated SQL run against.
             progress_callback: Called with (completed, total) after each item.
             item_callback: Called with each item's SampleRecord once it is done.
+            rate_limits: Lists the questions waiting out an LLM rate limit and
+                lets the user stop their retries.
+            time_shift_offsets_days: The time shift's offsets for this run
+                (default: the configured ones).
 
         Returns:
             Completed DatasetRun with all metrics.
@@ -184,6 +224,8 @@ class EvaluationRunner:
                 agent_kwargs=agent_kwargs,
                 dialect=dialect,
                 schema_map=schema_map,
+                rate_limits=rate_limits,
+                time_shift_offsets_days=time_shift_offsets_days,
             )
             completed += 1
             for callback, args in (
@@ -254,6 +296,8 @@ class EvaluationRunner:
         agent_kwargs: dict,
         dialect: str | None = None,
         schema_map: dict[str, dict[str, str]] | None = None,
+        rate_limits: RateLimitTracker | None = None,
+        time_shift_offsets_days: list[int] | None = None,
     ) -> SampleRecord:
         """
         Evaluate a single dataset item under the concurrency semaphore.
@@ -262,79 +306,114 @@ class EvaluationRunner:
         and reported, so it always appears in the Langfuse dataset run.
         """
         async with self._semaphore:
-            start_ms = time.monotonic() * 1000
-            context = EvaluationContext(
-                dataset_item=item,
-                run_id=run_id,
-                query=item.query,
-                expected_sql=item.expected_sql,
-                allowed_tables=allowed_tables,
-                connection_id=agent_kwargs.get("connection_id"),
-                dialect=dialect,
-                agent_dialect=self._agent_dialect,
-                schema_map=schema_map or {},
-                generated_on_agent_engine=bool(
-                    self._agent_executor
-                    and self._agent_executor.covers(agent_kwargs.get("connection_id"))
-                ),
+            scope = QuestionScope(
+                item_id=item.id,
+                question=item.query,
+                policy=self._rate_limit_policy,
+                tracker=rate_limits,
             )
-            self._adapt_expected_sql(context)
-            context.metadata["evaluation_config"] = {
-                "numeric_tolerance": self._numeric_tolerance,
-                "connection_dialect": dialect,
-                "agent_dialect": self._agent_dialect,
-                "agent": agent_kwargs.get("agent") or "current",
-                "agent_model": agent_kwargs.get("model") or "default",
-                "generated_sql_engine": (
-                    "agent_trino" if context.generated_on_agent_engine else "connection"
+            token = enter_question(scope)
+            try:
+                return await self._evaluate_in_scope(
+                    item, allowed_tables, run_id, run_name, parent_trace_id,
+                    agent_kwargs, dialect, schema_map, scope, time_shift_offsets_days,
+                )
+            finally:
+                leave_question(token)
+
+    async def _evaluate_in_scope(
+        self,
+        item,
+        allowed_tables: list[str],
+        run_id: str,
+        run_name: str,
+        parent_trace_id: str,
+        agent_kwargs: dict,
+        dialect: str | None,
+        schema_map: dict[str, dict[str, str]] | None,
+        scope: QuestionScope,
+        time_shift_offsets_days: list[int] | None,
+    ) -> SampleRecord:
+        start_ms = time.monotonic() * 1000
+        context = EvaluationContext(
+            dataset_item=item,
+            run_id=run_id,
+            query=item.query,
+            expected_sql=item.expected_sql,
+            allowed_tables=allowed_tables,
+            connection_id=agent_kwargs.get("connection_id"),
+            dialect=dialect,
+            agent_dialect=self._agent_dialect,
+            schema_map=schema_map or {},
+            generated_on_agent_engine=bool(
+                self._agent_executor
+                and self._agent_executor.covers(agent_kwargs.get("connection_id"))
+            ),
+        )
+        context.time_shift_offsets_days = time_shift_offsets_days
+        self._adapt_expected_sql(context)
+        context.metadata["evaluation_config"] = {
+            "numeric_tolerance": self._numeric_tolerance,
+            "connection_dialect": dialect,
+            "agent_dialect": self._agent_dialect,
+            "agent": agent_kwargs.get("agent") or "current",
+            "agent_model": agent_kwargs.get("model") or "default",
+            "generated_sql_engine": (
+                "agent_trino" if context.generated_on_agent_engine else "connection"
+            ),
+        }
+
+        results: list[EvaluationResult]
+        try:
+            await self._run_agent(context, agent_kwargs)
+            results = await run_with_deadline(
+                self._execute_and_evaluate(context),
+                self._evaluation_timeout,
+                label=f"evaluation of {item.id}",
+            )
+        except TimeoutError:
+            context.timed_out = True
+            context.error = context.error or (
+                f"evaluation_timed_out_after_{int(self._evaluation_timeout)}s"
+            )
+            logger.warning("evaluation_runner.evaluation_timeout", item_id=item.id)
+            results = self._error_results(context.error)
+        except Exception as exc:
+            context.error = context.error or f"evaluation_pipeline_error: {exc}"
+            logger.error(
+                "evaluation_runner.item_failed",
+                item_id=item.id,
+                error=str(exc),
+                exc_info=True,
+            )
+            results = self._error_results(context.error)
+
+        if scope.retries:
+            context.metadata["rate_limit_retries"] = dict(scope.retries)
+        label = scope.error_label()
+        if label and context.error is None:
+            # e.g. the LLM judge stayed rate limited: the question is rerun later
+            context.error = label
+        context.total_latency_ms = time.monotonic() * 1000 - start_ms
+        try:
+            await run_with_deadline(
+                self._reporter.report_sample(
+                    context=context,
+                    results=results,
+                    parent_trace_id=parent_trace_id,
+                    dataset_item_id=item.id,
+                    run_name=run_name,
                 ),
-            }
-
-            results: list[EvaluationResult]
-            try:
-                await self._run_agent(context, agent_kwargs)
-                results = await run_with_deadline(
-                    self._execute_and_evaluate(context),
-                    self._evaluation_timeout,
-                    label=f"evaluation of {item.id}",
-                )
-            except TimeoutError:
-                context.timed_out = True
-                context.error = context.error or (
-                    f"evaluation_timed_out_after_{int(self._evaluation_timeout)}s"
-                )
-                logger.warning("evaluation_runner.evaluation_timeout", item_id=item.id)
-                results = self._error_results(context.error)
-            except Exception as exc:
-                context.error = context.error or f"evaluation_pipeline_error: {exc}"
-                logger.error(
-                    "evaluation_runner.item_failed",
-                    item_id=item.id,
-                    error=str(exc),
-                    exc_info=True,
-                )
-                results = self._error_results(context.error)
-
-            context.total_latency_ms = time.monotonic() * 1000 - start_ms
-            try:
-                await run_with_deadline(
-                    self._reporter.report_sample(
-                        context=context,
-                        results=results,
-                        parent_trace_id=parent_trace_id,
-                        dataset_item_id=item.id,
-                        run_name=run_name,
-                    ),
-                    _REPORT_TIMEOUT_SECONDS,
-                    label=f"reporting of {item.id}",
-                )
-            except Exception as exc:
-                logger.error(
-                    "evaluation_runner.report_sample_failed",
-                    item_id=item.id,
-                    error=str(exc),
-                )
-            return SampleRecord(context=context, results=results)
+                _REPORT_TIMEOUT_SECONDS,
+                label=f"reporting of {item.id}",
+            )
+        except Exception as exc:
+            logger.error(
+                "evaluation_runner.report_sample_failed",
+                item_id=item.id,
+                error=str(exc),
+            )
+        return SampleRecord(context=context, results=results)
 
     @staticmethod
     def _adapt_expected_sql(context: EvaluationContext) -> None:
@@ -377,8 +456,44 @@ class EvaluationRunner:
         ]
 
     async def _run_agent(self, context: EvaluationContext, agent_kwargs: dict) -> None:
-        """Call the agent; failures are recorded on the context, never raised."""
+        """
+        Call the agent; failures are recorded on the context, never raised.
+
+        A call the LLM provider rate limited (the agent crashed or answered
+        with a 429 / rate-limit error) is retried after a wait, per the rate
+        limit policy; when out of retries, or stopped by the user, the question
+        is marked rate limited.
+        """
         agent_start = time.monotonic() * 1000
+        retry = 0
+        while True:
+            await self._call_agent_once(context, agent_kwargs)
+            context.agent_latency_ms = time.monotonic() * 1000 - agent_start
+            failed_without_sql = context.agent_crashed or (
+                context.agent_response is not None and context.generated_sql is None
+            )
+            if not (failed_without_sql and is_rate_limit(context.error)):
+                return
+            retry += 1
+            try:
+                await wait_before_retry("agent", retry, context.error)
+            except (RateLimitExhaustedError, RateLimitStoppedError):
+                scope_label = self._rate_limit_label()
+                context.error = scope_label or context.error
+                return
+            # Forget the rate-limited attempt and ask again
+            context.agent_crashed = False
+            context.agent_response = None
+            context.generated_sql = None
+            context.error = None
+
+    @staticmethod
+    def _rate_limit_label() -> str | None:
+        scope = current_question()
+        return scope.error_label() if scope else None
+
+    async def _call_agent_once(self, context: EvaluationContext, agent_kwargs: dict) -> None:
+        """One agent call; its outcome is recorded on the context."""
         try:
             # The agent streams keep-alive pings, so the HTTP client's read
             # timeout never fires on a stuck call: this deadline is the real limit
@@ -408,8 +523,6 @@ class EvaluationRunner:
                 error=context.error,
             )
             return
-        finally:
-            context.agent_latency_ms = time.monotonic() * 1000 - agent_start
 
         context.agent_response = agent_response
         context.generated_sql = agent_response.sql_query
@@ -420,7 +533,21 @@ class EvaluationRunner:
                 # after a Trino error). The SQL still exists and will be evaluated.
                 context.error = "sql_execution_failure"
             else:
-                context.error = agent_response.error or "agent_did_not_produce_sql"
+                context.error = agent_response.error or _no_sql_reason(agent_response)
+
+        # What the agent said about its run, so a question without SQL can be
+        # traced to the agent's own trace and its reason
+        for key, name in (
+            ("trace_id", "agent_trace_id"),
+            ("verification", "agent_verification"),
+            ("executed", "agent_executed"),
+            ("execution_path", "agent_execution_path"),
+        ):
+            val = agent_response.metadata.get(key)
+            if val is not None and val != []:
+                context.metadata[name] = val
+        if agent_response.sql_query is None and agent_response.summary:
+            context.metadata["agent_summary"] = agent_response.summary[:2000]
 
         for key in (
             "refiner_iteration_count",

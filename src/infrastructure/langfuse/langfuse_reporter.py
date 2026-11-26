@@ -149,6 +149,17 @@ class LangfuseReporter(TraceReporter):
                     "sql_generation_seconds": _seconds(context.agent_latency_ms),
                     "agent_crashed": context.agent_crashed,
                     "timed_out": context.timed_out,
+                    **{
+                        key: context.metadata[key]
+                        for key in (
+                            "agent_trace_id",
+                            "agent_verification",
+                            "agent_executed",
+                            "agent_execution_path",
+                            "agent_summary",
+                        )
+                        if key in context.metadata
+                    },
                 },
             )
             agent_span.end()
@@ -401,6 +412,10 @@ class LangfuseReporter(TraceReporter):
             "prompt_version",
             "feature_flags",
             "evaluation_config",
+            "agent_trace_id",
+            "agent_verification",
+            "agent_executed",
+            "agent_summary",
         ]:
             if key in context.metadata:
                 meta[key] = context.metadata[key]

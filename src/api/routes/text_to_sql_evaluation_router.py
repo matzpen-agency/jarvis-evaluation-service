@@ -182,6 +182,9 @@ class EvaluationJobResponse(BaseModel):
     finished_at: datetime | None = None
     # Questions finished so far, with their scores (filled while running)
     completed_cases: list[RunDatasetCaseResultDTO] = []
+    # Questions waiting out an LLM rate limit right now: question_id, question,
+    # stage (agent | llm_judge | order_judge), retry, max_retries, retry_at, error
+    rate_limited: list[dict] = []
     result: RunDatasetResponse | None = None
 
 
@@ -195,6 +198,7 @@ def _job_response(job: EvaluationJob) -> EvaluationJobResponse:
         created_at=job.created_at,
         finished_at=job.finished_at,
         completed_cases=list(job.completed_cases),
+        rate_limited=job.rate_limits.waiting() if job.status == "running" else [],
         result=job.result,
     )
 
@@ -226,6 +230,7 @@ async def submit_new_evaluation_job(
             request,
             progress_callback=progress_callback,
             case_callback=getattr(progress_callback, "add_case", None),
+            rate_limits=getattr(progress_callback, "rate_limits", None),
         )
 
     job = job_store.submit(
@@ -256,4 +261,37 @@ async def get_evaluation_job(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Evaluation job '{job_id}' not found",
         )
+    return _job_response(job)
+
+
+@router.post(
+    "/jobs/{job_id}/questions/{question_id}/stop-retry",
+    response_model=EvaluationJobResponse,
+    summary="Stop a question's rate-limit retries",
+    description=(
+        "The question stops waiting out the LLM provider's rate limit: it is "
+        "marked rate limited at once (and can be rerun later)."
+    ),
+    responses={
+        404: {"description": "Unknown job"},
+        409: {"description": "The question isn't retrying a rate limit"},
+    },
+)
+async def stop_question_retry(
+    job_id: str,
+    question_id: str,
+    job_store: EvaluationJobStore = Depends(get_job_store),
+) -> EvaluationJobResponse:
+    job = job_store.get(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Evaluation job '{job_id}' not found",
+        )
+    if job.status != "running" or not job.rate_limits.stop(question_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Question '{question_id}' isn't retrying a rate limit",
+        )
+    logger.info("router.stop_question_retry", job_id=job_id, question_id=question_id)
     return _job_response(job)

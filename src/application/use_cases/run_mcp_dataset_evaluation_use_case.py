@@ -24,6 +24,7 @@ from src.application.use_cases.run_dataset_evaluation_use_case import (
 )
 from src.domain.services.evaluation_runner import EvaluationRunner, ProgressCallback
 from src.domain.services.metrics_aggregator import MetricsAggregator
+from src.domain.services.rate_limit import RateLimitTracker
 from src.ports.benchmark_provider import BenchmarkProvider
 from src.ports.connection_metadata_provider import ConnectionMetadataProvider
 
@@ -68,6 +69,7 @@ class RunMcpDatasetEvaluationUseCase:
         request: RunMcpDatasetRequest,
         progress_callback: ProgressCallback | None = None,
         case_callback: Callable[[RunDatasetCaseResultDTO], None] | None = None,
+        rate_limits: RateLimitTracker | None = None,
     ) -> RunDatasetResponse:
         """
         Run a dataset evaluation against the MCP agent.
@@ -103,6 +105,8 @@ class RunMcpDatasetEvaluationUseCase:
                 **({"agent": request.agent} if request.agent != "current" else {}),
             },
             progress_callback=progress_callback,
+            rate_limits=rate_limits,
+            time_shift_offsets_days=request.time_shift_offsets_days,
             item_callback=(
                 (
                     lambda record: case_callback(

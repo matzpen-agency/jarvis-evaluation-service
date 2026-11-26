@@ -152,6 +152,15 @@ class Settings(BaseSettings):
     # Per time-shift offset (two query executions)
     TIME_SHIFT_TIMEOUT: float = 180.0
 
+    # ── LLM rate limits (HTTP 429) ───────────────────────────────────────────
+    # Every LLM call (the agent writing the SQL, the LLM judge, the order judge)
+    # that the provider rate limits is retried this many times, waiting
+    # LLM_RATE_LIMIT_RETRY_WAIT_SECONDS before the first retry and twice as
+    # long before each next one (20s, 40s, 80s). After that the question is
+    # marked rate limited, and the studio can rerun it.
+    LLM_RATE_LIMIT_MAX_RETRIES: int = Field(default=3, ge=0, le=10)
+    LLM_RATE_LIMIT_RETRY_WAIT_SECONDS: float = Field(default=20.0, gt=0, le=3600)
+
     # Time shift offsets in days (negative = past)
     TIME_SHIFT_OFFSETS_DAYS: list[int] = [-1, -7, -14, -30, -60]
 

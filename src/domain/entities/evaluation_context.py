@@ -75,6 +75,8 @@ class EvaluationContext:
 
     # ── Extensible metadata ───────────────────────────────────────────────────
     metadata: dict[str, Any] = field(default_factory=dict)
+    # This run's time shift offsets in days (None = the configured ones)
+    time_shift_offsets_days: list[int] | None = None
 
     @property
     def succeeded(self) -> bool:

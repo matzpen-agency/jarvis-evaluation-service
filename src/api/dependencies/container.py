@@ -41,6 +41,10 @@ from src.domain.metrics.composite_score_calculator import CompositeWeights
 from src.domain.services.evaluation_engine import EvaluationEngine
 from src.domain.services.evaluation_runner import EvaluationRunner
 from src.domain.services.metrics_aggregator import MetricsAggregator
+from src.domain.services.rate_limit import (
+    RateLimitPolicy,
+    configure as configure_rate_limits,
+)
 from src.infrastructure.bird.bird_benchmark_provider import BirdBenchmarkProvider
 from src.infrastructure.bird.bird_dataset_loader import BirdDatasetLoader
 from src.infrastructure.jeen.jeen_metadata_client import (
@@ -88,6 +92,16 @@ def get_settings() -> Settings:
     """Return the singleton Settings instance."""
     return Settings()
 
+
+
+def rate_limit_policy(settings: Settings) -> RateLimitPolicy:
+    """How LLM calls wait out the provider's rate limit (also calls outside a question)."""
+    policy = RateLimitPolicy(
+        max_retries=settings.LLM_RATE_LIMIT_MAX_RETRIES,
+        wait_seconds=settings.LLM_RATE_LIMIT_RETRY_WAIT_SECONDS,
+    )
+    configure_rate_limits(policy)
+    return policy
 
 # ── Infrastructure factories ───────────────────────────────────────────────────
 
@@ -402,6 +416,7 @@ def get_run_dataset_use_case(
         expected_on_agent_engine=settings.EXPECTED_SQL_ON_AGENT_ENGINE,
         false_negative_judge=_get_false_negative_judge(),
         judge_min_confidence=settings.LLM_JUDGE_MIN_CONFIDENCE,
+        rate_limit_policy=rate_limit_policy(settings),
     )
 
     return RunDatasetEvaluationUseCase(
@@ -454,6 +469,7 @@ def get_run_mcp_dataset_use_case(
         expected_on_agent_engine=settings.EXPECTED_SQL_ON_AGENT_ENGINE,
         false_negative_judge=_get_false_negative_judge(),
         judge_min_confidence=settings.LLM_JUDGE_MIN_CONFIDENCE,
+        rate_limit_policy=rate_limit_policy(settings),
     )
 
     return RunMcpDatasetEvaluationUseCase(

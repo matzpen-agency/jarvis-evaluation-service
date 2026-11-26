@@ -21,6 +21,8 @@ from typing import Any
 
 import structlog
 
+from src.domain.services.rate_limit import RateLimitTracker
+
 logger = structlog.get_logger(__name__)
 
 ProgressCallback = Callable[[int, int], None]
@@ -42,6 +44,8 @@ class EvaluationJob:
     created_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
     finished_at: datetime | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Questions waiting out an LLM rate limit, and their stop switches
+    rate_limits: RateLimitTracker = field(default_factory=RateLimitTracker)
 
 
 class EvaluationJobStore:
@@ -66,7 +70,12 @@ class EvaluationJobStore:
 
     async def _run(self, job: EvaluationJob, runner: JobRunner) -> None:
         class Progress:
-            """Callable progress reporter; .add_case() records a finished question."""
+            """
+            Callable progress reporter; .add_case() records a finished question,
+            .rate_limits lists the questions waiting out a rate limit.
+            """
+
+            rate_limits = job.rate_limits
 
             def __call__(self, completed: int, total: int) -> None:
                 job.completed_items = completed
